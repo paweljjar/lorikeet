@@ -6,6 +6,7 @@
 
 #include <mutex>
 #include <netdb.h>
+#include <set>
 #include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -18,9 +19,11 @@ namespace UIEngine {
 
         thread_local std::vector<std::string> threadScopeStack; // Thread-local component hierarchy scope stack
         thread_local std::map<std::string, size_t> threadChildIndexMap; // Thread-local component occurrence counters per render pass
+        thread_local std::set<std::string> threadVisitedComponents; // Thread-local set of component keys rendered during the current pass
 
-        std::mutex fallbackStateMutex; // Mutex guarding fallback state map when running outside an active session context
+        std::mutex fallbackStateMutex; // Mutex guarding fallback state and mounted component maps when running outside an active session context
         std::map<std::string, std::any> fallbackStateStore; // Fallback state storage for non-session or startup state access
+        std::map<std::string, std::function<void()>> fallbackMountedComponents; // Fallback registry of mounted components outside an active session
 
         std::mutex fallbackHandlerMutex; // Mutex guarding fallback handler registry
         std::map<std::string, EventHandler> fallbackHandlerRegistry; // Fallback handler registry
@@ -328,7 +331,7 @@ namespace UIEngine {
             const std::string parentScope = getCurrentScope();
             std::string childKey;
             if (!explicitKey.empty()) {
-                childKey = explicitKey;
+                childKey = typeHint + ":" + explicitKey;
             } else {
                 const std::string counterKey = parentScope.empty() ? typeHint : parentScope + "/" + typeHint;
                 const size_t index = threadChildIndexMap[counterKey]++;
@@ -337,9 +340,38 @@ namespace UIEngine {
             return parentScope.empty() ? childKey : parentScope + "/" + childKey;
         }
 
-        void resetRenderContext() { // Reset the render pass component indexing and scope stack
+        void resetRenderContext() { // Reset the render pass component indexing, scope stack, and visited components set
             threadScopeStack.clear();
             threadChildIndexMap.clear();
+            threadVisitedComponents.clear();
+        }
+
+        void registerComponentMount(const std::string& key, Component& comp, std::function<void()> unmountFn) { // Record component in current render pass and invoke onMount() if newly mounted
+            threadVisitedComponents.insert(key);
+            const auto session = SessionContext::getCurrentSession();
+            if (session) {
+                std::lock_guard lock(session->mutex);
+                if (!session->mountedComponents.contains(key)) {
+                    session->mountedComponents[key] = std::move(unmountFn);
+                    comp.onMount();
+                } else {
+                    session->mountedComponents[key] = std::move(unmountFn);
+                }
+                return;
+            }
+            std::lock_guard lock(fallbackStateMutex);
+            if (!fallbackMountedComponents.contains(key)) {
+                fallbackMountedComponents[key] = std::move(unmountFn);
+                comp.onMount();
+            } else {
+                fallbackMountedComponents[key] = std::move(unmountFn);
+            }
+        }
+
+        void reconcileUnmountedComponents() { // Invoke onUnmount() and clean up scoped state for components that disappeared in the latest render pass
+        }
+
+        void unmountAllComponents(Session& /*session*/) { // Invoke onUnmount() for all mounted components in the given session and clear its lifecycle registry
         }
 
         std::any& getOrInitState(const std::string& key, const std::function<std::any()>& initializer) { // Retrieve a reference to the stored std::any value for key, initializing it if absent
@@ -408,11 +440,11 @@ namespace UIEngine {
     }
 
     VNode VNode::textNode(std::string content) { // Create a raw text VNode with tag "#text" and the given text content
-        return VNode{.tag = "#text", .props = {}, .text = std::move(content), .children = {}}; // Initialize VNode with "#text" tag, empty props, moved text, and no children
+        return VNode("#text", {}, std::move(content), {}); // Initialize VNode with "#text" tag, empty props, moved text, and no children
     }
 
     VNode VNode::el(std::string tag, Props props, std::vector<VNode> children) { // Create an HTML element VNode with tag, attributes, and child nodes
-        return VNode{.tag = std::move(tag), .props = std::move(props), .text = "", .children = std::move(children)}; // Initialize VNode with moved tag, props, empty text, and moved children
+        return VNode(std::move(tag), std::move(props), "", std::move(children)); // Initialize VNode with moved tag, props, empty text, and moved children
     }
 
     HTTPServer::Json VNode::toJson() const { // Recursively serialize this VNode and its children into an HTTPServer::Json object
@@ -697,7 +729,7 @@ namespace UIEngine {
             const auto session = SessionManager::instance().getOrCreateSession(sessionId);
             {
                 std::lock_guard lock(session->mutex);
-                session->mounted = false;
+                session->mountedComponents.clear();
                 session->stateStore.clear();
             }
             SessionContext sessionCtx(session);

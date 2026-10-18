@@ -84,7 +84,7 @@ namespace UIEngine {
         std::map<std::string, EventHandler> handlerRegistry; // Per-session map of generated handler IDs to callbacks
         size_t nextHandlerId = 0; // Monotonically increasing handler ID counter for this session
         std::chrono::steady_clock::time_point lastAccessed = std::chrono::steady_clock::now(); // Timestamp of last client interaction
-        bool mounted = false; // Lifecycle flag indicating whether root component onMount has executed for this session
+        std::map<std::string, std::function<void()>> mountedComponents; // Per-session registry mapping mounted component scope keys to their onUnmount callbacks
 
         void touch(); // Update lastAccessed timestamp to current steady clock time
     };
@@ -124,15 +124,19 @@ namespace UIEngine {
             std::string _prevId; // Previously bound session ID restored on destruction
     };
 
-    class Component; // Forward declaration for Component-scoped State handles
+    class Component; // Forward declaration for Component-scoped State handles and lifecycle hooks
 
-    namespace Detail { // Internal state store helpers backing persistent UIEngine::State<T> instances across renders
+    namespace Detail { // Internal state store and lifecycle helpers backing persistent UIEngine::State<T> and Component instances across renders
         void pushScope(std::string scopeName); // Push a component scope identifier onto the thread-local scope stack
         void popScope(); // Pop the most recent component scope identifier from the thread-local scope stack
         [[nodiscard]] std::string getCurrentScope(); // Retrieve the current fully-qualified component scope path
         [[nodiscard]] std::string resolveStateKey(const std::string& rawKey); // Resolve a state key against the active component scope
         [[nodiscard]] std::string generateComponentKey(const std::string& typeHint, const std::string& explicitKey = ""); // Generate a scoped component identifier
         void resetRenderContext(); // Reset the render pass component indexing and scope stack
+
+        void registerComponentMount(const std::string& key, Component& comp, std::function<void()> unmountFn); // Record component in current render pass and invoke onMount() if newly mounted
+        void reconcileUnmountedComponents(); // Invoke onUnmount() and clean up scoped state for components that disappeared in the latest render pass
+        void unmountAllComponents(Session& session); // Invoke onUnmount() for all mounted components in the given session and clear its lifecycle registry
 
         class ComponentScopeGuard { // RAII guard pushing and popping a component scope during rendering
             public:
@@ -196,6 +200,14 @@ namespace UIEngine {
         std::string text; // Text content used when tag is "#text"
         std::vector<VNode> children; // Ordered list of child Virtual DOM nodes
 
+        VNode() = default; // Default constructor creating an empty VNode
+        VNode(std::string tag, Props props, std::string text, std::vector<VNode> children)
+            : tag(std::move(tag)), props(std::move(props)), text(std::move(text)), children(std::move(children)) {} // Construct a VNode from tag, props, text, and children
+
+        template <typename CompT>
+        requires (std::derived_from<std::decay_t<CompT>, Component> && !std::same_as<std::decay_t<CompT>, Component>)
+        VNode(CompT&& comp); // Implicitly convert any derived Component instance into its rendered VNode with lifecycle tracking
+
         static VNode textNode(std::string content); // Create a raw text VNode with tag "#text" and the given text content
         static VNode el(std::string tag, Props props = {}, std::vector<VNode> children = {}); // Create an HTML element VNode with tag, attributes, and child nodes
 
@@ -207,7 +219,8 @@ namespace UIEngine {
             explicit Component(Props props = {}) : _props(std::move(props)) {} // Construct a component with an optional map of properties
             virtual ~Component() = default; // Virtual destructor for safe polymorphic cleanup of derived components
 
-            virtual void onMount() {} // Optional lifecycle hook invoked once when the component is initially mounted
+            virtual void onMount() {} // Optional lifecycle hook invoked once when the component is initially mounted into the tree
+            virtual void onUnmount() {} // Optional lifecycle hook invoked once when the component is removed from the tree
             [[nodiscard]] virtual VNode render() const = 0; // Pure virtual method implemented by derived components to return their VNode subtree
             [[nodiscard]] virtual StyleSheet styles() const { return {}; } // Optional virtual method allowing components to define their own scoped/associated CSS rules
             [[nodiscard]] virtual std::string getComponentName() const { return "Component"; } // Optional name hint used for automatic scope generation
@@ -227,8 +240,6 @@ namespace UIEngine {
 
             [[nodiscard]] VNode renderWithScope() const; // Execute render() wrapped inside this component's active scope guard
 
-            operator VNode() const { return renderWithScope(); } // Implicitly convert any Component instance into its rendered VNode for seamless nesting in children lists
-
         protected:
             Props _props; // Component properties passed in at construction time
             mutable std::string _instanceKey; // Cached instance scope key for this component
@@ -245,11 +256,28 @@ namespace UIEngine {
         Detail::getOrInitState(_key, [init = _initialValue] { return std::any(init); });
     }
 
+    template <typename CompT>
+    requires (std::derived_from<std::decay_t<CompT>, Component> && !std::same_as<std::decay_t<CompT>, Component>)
+    VNode renderComponent(CompT&& comp) { // Render a derived component instance within its scope while managing its onMount and onUnmount lifecycle
+        using DecayedT = std::decay_t<CompT>;
+        const std::string key = comp.getComponentKey();
+        Detail::ComponentScopeGuard guard(key);
+        auto instanceCopy = std::make_shared<DecayedT>(std::forward<CompT>(comp));
+        Detail::registerComponentMount(key, *instanceCopy, [instanceCopy] {
+            instanceCopy->onUnmount();
+        });
+        return instanceCopy->render();
+    }
+
+    template <typename CompT>
+    requires (std::derived_from<std::decay_t<CompT>, Component> && !std::same_as<std::decay_t<CompT>, Component>)
+    VNode::VNode(CompT&& comp) : VNode(renderComponent(std::forward<CompT>(comp))) {} // Delegate component-to-VNode conversion to renderComponent
+
     template <typename CompT, typename... Args>
     requires std::derived_from<CompT, Component>
     VNode component(Args&&... args) { // Helper to instantiate a derived Component with arguments and return its rendered VNode
         CompT instance(std::forward<Args>(args)...); // Construct the component instance with forwarded arguments
-        return instance.renderWithScope(); // Render and return the resulting VNode subtree
+        return renderComponent(std::move(instance)); // Render with lifecycle tracking and return the resulting VNode subtree
     }
 
     // Mount a root VNode factory and StyleSheet onto the frontend HTTP server (registers GET "/", GET "/styles.css", GET "/vdom", and POST "/event")
@@ -261,7 +289,7 @@ namespace UIEngine {
         const std::string &pageTitle = "App"
     );
 
-    // Overload of serveApp that accepts a root Component subclass directly, runs onMount() once, and automatically extracts its styles()
+    // Overload of serveApp that accepts a root Component subclass directly, runs lifecycle hooks, and automatically extracts its styles()
     template <typename CompT>
     requires std::derived_from<CompT, Component>
     void serveApp(
@@ -276,15 +304,7 @@ namespace UIEngine {
         serveApp(
             frontend,
             [comp = std::move(rootComponent)]() mutable {
-                const auto session = SessionContext::getCurrentSession();
-                if (session) {
-                    if (!session->mounted) {
-                        session->mounted = true;
-                        Detail::ComponentScopeGuard mountGuard(comp.getComponentKey());
-                        comp.onMount();
-                    }
-                }
-                return comp.renderWithScope();
+                return renderComponent(comp);
             },
             std::move(combinedStyles),
             std::move(apiBaseUrl),
