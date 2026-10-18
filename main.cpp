@@ -580,7 +580,7 @@ namespace {
 
                 if (wordList.empty()) {
                     cardNodes.push_back(
-                        UIEngine::Tags::div({{"class", "empty-state"}}, {
+                        UIEngine::Tags::div({{"key", "empty-state"}, {"class", "empty-state"}}, {
                             UIEngine::Tags::p({{"class", "empty-title"}}, "No flashcards yet!"),
                             UIEngine::Tags::p({{"class", "empty-sub"}}, "Add your first word and translation above.")
                         })
