@@ -195,6 +195,7 @@ namespace UIEngine {
         Props props; // Map of HTML attributes and properties attached to this element
         std::string text; // Text content used when tag is "#text"
         std::vector<VNode> children; // Ordered list of child Virtual DOM nodes
+        std::string key = ""; // Optional unique reconciliation key for keyed DOM diffing
 
         static VNode textNode(std::string content); // Create a raw text VNode with tag "#text" and the given text content
         static VNode el(std::string tag, Props props = {}, std::vector<VNode> children = {}); // Create an HTML element VNode with tag, attributes, and child nodes

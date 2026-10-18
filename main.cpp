@@ -256,6 +256,8 @@ namespace {
         public:
             using Component::Component;
 
+            [[nodiscard]] std::string getComponentName() const override { return "WordCard"; }
+
             [[nodiscard]] UIEngine::VNode render() const override {
                 const std::string id = getProp("id", "0");
                 const UIEngine::EventHandler onDeleted = getCallback("onDeleted");
@@ -359,7 +361,7 @@ namespace {
 
                 if (wordList.empty()) {
                     cardNodes.push_back(
-                        UIEngine::Tags::div({{"class", "empty-state"}}, {
+                        UIEngine::Tags::div({{"key", "empty-state"}, {"class", "empty-state"}}, {
                             UIEngine::Tags::p({{"class", "empty-title"}}, "No flashcards yet!"),
                             UIEngine::Tags::p({{"class", "empty-sub"}}, "Add your first word and translation above.")
                         })
@@ -380,6 +382,7 @@ namespace {
                             : "";
 
                         cardNodes.push_back(WordCard({
+                            {"key", "word-" + id},
                             {"id", id},
                             {"word", word},
                             {"translation", translation},
@@ -394,8 +397,8 @@ namespace {
                         {"count", std::to_string(wordList.size())}
                     }),
                     UIEngine::Tags::section({{"class", "goals-section"}}, {
-                        Counter({{"label", "🎯 Daily Goal"}}),
-                        Counter({{"label", "🔥 Streak Count"}})
+                        Counter({{"key", "daily-goal"}, {"label", "🎯 Daily Goal"}}),
+                        Counter({{"key", "streak-count"}, {"label", "🔥 Streak Count"}})
                     }),
                     AddWordCard({
                         {"onAdded", [this] { refreshWords(); }}
