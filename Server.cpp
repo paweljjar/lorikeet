@@ -132,6 +132,11 @@ namespace HTTPServer {
     void Server::get(const std::string& path, RequestHandler handler)  { _addRoute("GET",  path, std::move(handler)); } // Register a GET route with the specified path and handler function, moving the handler to avoid unnecessary copies
     void Server::post(const std::string& path, RequestHandler handler) { _addRoute("POST", path, std::move(handler)); } // Register a POST route with the specified path and handler function, moving the handler to avoid unnecessary copies
 
+    void Server::setFallbackGetHandler(RequestHandler handler) { // Register a fallback handler for unmatched HTTP GET requests
+        _fallbackGetHandler = std::move(handler);
+        _log("Registered fallback GET handler");
+    }
+
     int Server::getPort() const { // Return the port number that the server is listening on
         return _port;
     }
@@ -258,7 +263,7 @@ namespace HTTPServer {
         out << "Access-Control-Allow-Origin: *\r\n"
             << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
             << "Access-Control-Allow-Headers: Content-Type, X-Session-Id\r\n"
-            << "Access-Control-Expose-Headers: X-Session-Id\r\n"
+            << "Access-Control-Expose-Headers: X-Session-Id, X-Route-Path\r\n"
             << "Connection: close\r\n\r\n"
             << response.body;
         return out.str();
@@ -440,6 +445,17 @@ namespace HTTPServer {
                 return; // Return immediately after setting the 405 response
             }
         }
+
+        if (request.method == "GET" && _fallbackGetHandler) { // Invoke fallback GET handler when an unmatched GET path is requested
+            try {
+                _fallbackGetHandler(request, response);
+            } catch (const std::exception& e) {
+                _logError(std::string("Fallback GET handler threw: ") + e.what());
+                _setError(response, HTTP_INTERNAL_SERVER_ERROR);
+            }
+            return;
+        }
+
         _setError(response, HTTP_NOT_FOUND); // If the path does not exist under any registered HTTP method, set the response to HTTP 404 (Not Found)
     }
     //endregion private methods

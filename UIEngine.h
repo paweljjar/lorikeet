@@ -85,9 +85,13 @@ namespace UIEngine {
         size_t nextHandlerId = 0; // Monotonically increasing handler ID counter for this session
         std::chrono::steady_clock::time_point lastAccessed = std::chrono::steady_clock::now(); // Timestamp of last client interaction
         std::map<std::string, std::function<void()>> mountedComponents; // Per-session registry mapping mounted component scope keys to their onUnmount callbacks
+        std::string currentPath = "/"; // Active client-side route path for this session
 
         void touch(); // Update lastAccessed timestamp to current steady clock time
     };
+
+    [[nodiscard]] std::string currentPath(); // Retrieve the normalized active client-side route path for the current session
+    void navigate(std::string path); // Update the active client-side route path for the current session
 
     class SessionManager { // Thread-safe manager for creating, looking up, and expiring client sessions
         public:
@@ -281,7 +285,15 @@ namespace UIEngine {
         return renderComponent(std::move(instance)); // Render with lifecycle tracking and return the resulting VNode subtree
     }
 
-    // Mount a root VNode factory and StyleSheet onto the frontend HTTP server (registers GET "/", GET "/styles.css", GET "/vdom", and POST "/event")
+    struct Route { // Declarative route entry mapping a URL path pattern to a lazy VNode factory
+        std::string path; // Route path (e.g., "/", "/deck", "/practice", "/stats", or "*" for fallback)
+        std::function<VNode()> render; // Lazy factory invoked only when this route matches the active session path
+    };
+
+    [[nodiscard]] VNode Router(const std::vector<Route>& routes, const std::string& fallbackPath = "/"); // Match currentPath() against routes and render the active route's VNode
+    [[nodiscard]] VNode Link(const std::string& to, const std::string& text, Props props = {}); // Create a client-side navigation <a> element that switches routes without reloading the page
+
+    // Mount a root VNode factory and StyleSheet onto the frontend HTTP server (registers GET "/", GET "/styles.css", GET "/vdom", POST "/navigate", and POST "/event")
     void serveApp(
         HTTPServer::Server& frontend,
         std::function<VNode()> rootFactory,
@@ -318,11 +330,14 @@ namespace UIEngine {
         VNode span(Props props = {}, std::vector<VNode> children = {}); // Create a <span> inline container element with props and child VNodes
         VNode span(Props props, const std::string &text); // Create a <span> inline element containing a single text node
         VNode header(Props props = {}, std::vector<VNode> children = {}); // Create a <header> semantic element with props and child VNodes
+        VNode nav(Props props = {}, std::vector<VNode> children = {}); // Create a <nav> semantic navigation container element with props and child VNodes
         VNode main(Props props = {}, std::vector<VNode> children = {}); // Create a <main> semantic element with props and child VNodes
         VNode section(Props props = {}, std::vector<VNode> children = {}); // Create a <section> semantic element with props and child VNodes
         VNode ul(Props props = {}, std::vector<VNode> children = {}); // Create an unordered list <ul> element with props and child VNodes
         VNode li(Props props = {}, std::vector<VNode> children = {}); // Create a list item <li> element with props and child VNodes
         VNode form(Props props = {}, std::vector<VNode> children = {}); // Create a <form> element with props and child VNodes
+        VNode a(Props props = {}, std::vector<VNode> children = {}); // Create an <a> anchor element with props and child VNodes
+        VNode a(Props props, std::string text); // Create an <a> anchor element containing a single text label
 
         VNode h1(Props props, std::string text); // Create an <h1> heading element containing a single text node
         VNode h2(Props props, std::string text); // Create an <h2> heading element containing a single text node
