@@ -11,7 +11,7 @@
 using namespace HTTPServer;
 
 namespace {
-    class TopBar : public UIEngine::Component { // Friendly gamified header bar with Lorikeet mascot, app title, and word counter pill
+    class TopBar : public UIEngine::Component { // Friendly gamified header bar with Lorikeet mascot, navigation tabs, and word counter pill
         public:
             using Component::Component;
 
@@ -23,6 +23,11 @@ namespace {
                     UIEngine::Tags::div({{"class", "brand"}}, {
                         UIEngine::Tags::span({{"class", "brand-icon"}}, "🦜"),
                         UIEngine::Tags::span({{"class", "brand-name"}}, getProp("title", "Lorikeet"))
+                    }),
+                    UIEngine::Tags::nav({{"class", "topbar-nav"}}, {
+                        UIEngine::Link("/deck", "📚 Deck", {{"defaultActive", "true"}}),
+                        UIEngine::Link("/practice", "🎯 Practice"),
+                        UIEngine::Link("/stats", "📊 Stats")
                     }),
                     UIEngine::Tags::div({{"class", "counter-pill"}}, {
                         UIEngine::VNode::textNode("⭐ " + count + " Words")
@@ -36,6 +41,8 @@ namespace {
                     {"display", "flex"},
                     {"justify-content", "space-between"},
                     {"align-items", "center"},
+                    {"flex-wrap", "wrap"},
+                    {"gap", "1rem"},
                     {"padding-bottom", "1.25rem"},
                     {"margin-bottom", "2rem"},
                     {"border-bottom", "2px solid #e5e5e5"}
@@ -53,6 +60,30 @@ namespace {
                     {"font-weight", "800"},
                     {"color", "#1cb0f6"},
                     {"letter-spacing", "-0.5px"}
+                })
+                .rule(".topbar-nav", {
+                    {"display", "flex"},
+                    {"align-items", "center"},
+                    {"gap", "0.5rem"}
+                })
+                .rule(".nav-link", {
+                    {"text-decoration", "none"},
+                    {"color", "#777777"},
+                    {"font-weight", "800"},
+                    {"font-size", "0.95rem"},
+                    {"padding", "0.5rem 0.95rem"},
+                    {"border-radius", "0.85rem"},
+                    {"border", "2px solid transparent"},
+                    {"transition", "background 0.12s ease, color 0.12s ease, border-color 0.12s ease"}
+                })
+                .rule(".nav-link:hover", {
+                    {"background", "#f0f0f0"},
+                    {"color", "#3c3c3c"}
+                })
+                .rule(".nav-link.active", {
+                    {"background", "#ddf4ff"},
+                    {"color", "#1cb0f6"},
+                    {"border-color", "#84d8ff"}
                 })
                 .rule(".counter-pill", {
                     {"background", "#fff4e5"},
@@ -349,7 +380,185 @@ namespace {
             }
     };
 
-    class App : public UIEngine::Component { // Stateful C++ frontend application component managing vocabulary flashcards
+    class PracticeView : public UIEngine::Component { // Interactive flashcard flip & review view mounted at /practice
+        public:
+            using Component::Component;
+
+            [[nodiscard]] std::string getComponentName() const override { return "PracticeView"; }
+
+            [[nodiscard]] UIEngine::VNode render() const override {
+                const int total = std::stoi(getProp("total", "0"));
+                if (total <= 0) {
+                    return UIEngine::Tags::section({{"class", "practice-empty"}}, {
+                        UIEngine::Tags::h2({{"class", "section-title"}}, "No Cards to Practice Yet"),
+                        UIEngine::Tags::p({{"class", "section-subtitle"}}, "Add some words to your deck first to start a practice session."),
+                        UIEngine::Tags::button({
+                            {"class", "btn-add"},
+                            {"onClick", [] { UIEngine::navigate("/deck"); }}
+                        }, "GO TO DECK")
+                    });
+                }
+
+                UIEngine::State<int> indexState = useState<int>("index", 0);
+                UIEngine::State<bool> flippedState = useState<bool>("flipped", false);
+
+                int idx = indexState.get() % total;
+                if (idx < 0) idx += total;
+
+                const std::string word = getProp("word_" + std::to_string(idx), "");
+                const std::string translation = getProp("trans_" + std::to_string(idx), "");
+                const bool isFlipped = flippedState.get();
+
+                return UIEngine::Tags::section({{"class", "practice-container"}}, {
+                    UIEngine::Tags::div({{"class", "practice-header"}}, {
+                        UIEngine::Tags::h2({{"class", "section-title"}}, "Flashcard Practice"),
+                        UIEngine::Tags::span({{"class", "practice-progress"}},
+                            "Card " + std::to_string(idx + 1) + " of " + std::to_string(total))
+                    }),
+                    UIEngine::Tags::div({
+                        {"class", isFlipped ? "flashcard flipped" : "flashcard"},
+                        {"onClick", [flippedState] { flippedState.set(!flippedState.get()); }}
+                    }, {
+                        UIEngine::Tags::span({{"class", "flashcard-badge"}},
+                            isFlipped ? "TRANSLATION" : "WORD"),
+                        UIEngine::Tags::h3({{"class", "flashcard-main"}},
+                            isFlipped ? translation : word),
+                        UIEngine::Tags::p({{"class", "flashcard-hint"}},
+                            isFlipped ? "Click card to flip back to word" : "Click card to reveal translation")
+                    }),
+                    UIEngine::Tags::div({{"class", "practice-controls"}}, {
+                        UIEngine::Tags::button({
+                            {"class", "btn-secondary"},
+                            {"onClick", [indexState, flippedState, idx, total] {
+                                indexState.set((idx - 1 + total) % total);
+                                flippedState.set(false);
+                            }}
+                        }, "← PREVIOUS"),
+                        UIEngine::Tags::button({
+                            {"class", "btn-flip"},
+                            {"onClick", [flippedState] {
+                                flippedState.set(!flippedState.get());
+                            }}
+                        }, isFlipped ? "HIDE ANSWER" : "SHOW ANSWER"),
+                        UIEngine::Tags::button({
+                            {"class", "btn-secondary"},
+                            {"onClick", [indexState, flippedState, idx, total] {
+                                indexState.set((idx + 1) % total);
+                                flippedState.set(false);
+                            }}
+                        }, "NEXT →")
+                    })
+                });
+            }
+
+            [[nodiscard]] UIEngine::StyleSheet styles() const override {
+                UIEngine::StyleSheet s;
+                s.rule(".practice-container", {
+                    {"display", "flex"},
+                    {"flex-direction", "column"},
+                    {"gap", "1.25rem"}
+                })
+                .rule(".practice-header", {
+                    {"display", "flex"},
+                    {"justify-content", "space-between"},
+                    {"align-items", "center"}
+                })
+                .rule(".practice-progress", {
+                    {"font-weight", "800"},
+                    {"color", "#1cb0f6"},
+                    {"background", "#ddf4ff"},
+                    {"padding", "0.35rem 0.85rem"},
+                    {"border-radius", "999px"},
+                    {"font-size", "0.9rem"}
+                })
+                .rule(".flashcard", {
+                    {"background", "#ffffff"},
+                    {"border", "2px solid #e5e5e5"},
+                    {"border-bottom", "6px solid #e5e5e5"},
+                    {"border-radius", "1.5rem"},
+                    {"padding", "3.25rem 2rem"},
+                    {"text-align", "center"},
+                    {"cursor", "pointer"},
+                    {"user-select", "none"},
+                    {"transition", "transform 0.12s ease, border-color 0.12s ease, background 0.12s ease"}
+                })
+                .rule(".flashcard:hover", {
+                    {"border-color", "#1cb0f6"},
+                    {"transform", "translateY(-2px)"}
+                })
+                .rule(".flashcard.flipped", {
+                    {"background", "#f0fbe8"},
+                    {"border-color", "#58cc02"}
+                })
+                .rule(".flashcard-badge", {
+                    {"display", "inline-block"},
+                    {"font-size", "0.75rem"},
+                    {"font-weight", "800"},
+                    {"letter-spacing", "0.8px"},
+                    {"color", "#777777"},
+                    {"background", "#f0f0f0"},
+                    {"padding", "0.25rem 0.7rem"},
+                    {"border-radius", "0.5rem"},
+                    {"margin-bottom", "1rem"}
+                })
+                .rule(".flashcard-main", {
+                    {"margin", "0 0 1rem 0"},
+                    {"font-size", "2.2rem"},
+                    {"font-weight", "800"},
+                    {"color", "#3c3c3c"}
+                })
+                .rule(".flashcard-hint", {
+                    {"margin", "0"},
+                    {"font-size", "0.9rem"},
+                    {"font-weight", "600"},
+                    {"color", "#999999"}
+                })
+                .rule(".practice-controls", {
+                    {"display", "flex"},
+                    {"justify-content", "space-between"},
+                    {"gap", "0.75rem"},
+                    {"flex-wrap", "wrap"}
+                })
+                .rule(".btn-secondary", {
+                    {"background", "#ffffff"},
+                    {"color", "#4b4b4b"},
+                    {"border", "2px solid #e5e5e5"},
+                    {"border-bottom", "4px solid #e5e5e5"},
+                    {"border-radius", "0.9rem"},
+                    {"padding", "0.8rem 1.25rem"},
+                    {"font-weight", "800"},
+                    {"font-size", "0.9rem"},
+                    {"cursor", "pointer"}
+                })
+                .rule(".btn-secondary:hover", {
+                    {"background", "#f7f7f7"}
+                })
+                .rule(".btn-flip", {
+                    {"background", "#1cb0f6"},
+                    {"color", "#ffffff"},
+                    {"border", "none"},
+                    {"border-bottom", "4px solid #1899d6"},
+                    {"border-radius", "0.9rem"},
+                    {"padding", "0.8rem 1.6rem"},
+                    {"font-weight", "800"},
+                    {"font-size", "0.9rem"},
+                    {"cursor", "pointer"}
+                })
+                .rule(".btn-flip:hover", {
+                    {"filter", "brightness(1.05)"}
+                })
+                .rule(".practice-empty", {
+                    {"background", "#ffffff"},
+                    {"border", "2px dashed #e5e5e5"},
+                    {"border-radius", "1.25rem"},
+                    {"padding", "2.75rem 1.5rem"},
+                    {"text-align", "center"}
+                });
+                return s;
+            }
+    };
+
+    class App : public UIEngine::Component { // Stateful C++ frontend application component managing vocabulary flashcards across multiple routes
         public:
             using Component::Component;
 
@@ -366,8 +575,7 @@ namespace {
                 }
             }
 
-            [[nodiscard]] UIEngine::VNode render() const override {
-                const Json::Array& wordList = _words.get();
+            [[nodiscard]] UIEngine::VNode renderDeckView(const Json::Array& wordList) const {
                 std::vector<UIEngine::VNode> cardNodes;
 
                 if (wordList.empty()) {
@@ -393,6 +601,7 @@ namespace {
                             : "";
 
                         cardNodes.push_back(WordCard({
+                            {"key", id},
                             {"id", id},
                             {"word", word},
                             {"translation", translation},
@@ -401,15 +610,7 @@ namespace {
                     }
                 }
 
-                return UIEngine::Tags::main({{"id", "app"}}, {
-                    TopBar({
-                        {"title", "Lorikeet"},
-                        {"count", std::to_string(wordList.size())}
-                    }),
-                    UIEngine::Tags::section({{"class", "goals-section"}}, {
-                        Counter({{"label", "🎯 Daily Goal"}, {"initial", "10"}}),
-                        Counter({{"label", "🔥 Streak Count"}, {"initial", "3"}})
-                    }),
+                return UIEngine::Tags::div({}, {
                     AddWordCard({
                         {"onAdded", [this] { refreshWords(); }}
                     }),
@@ -417,6 +618,89 @@ namespace {
                         UIEngine::Tags::h2({{"class", "deck-heading"}}, "Saved Flashcards"),
                         UIEngine::Tags::div({{"class", "cards-grid"}}, std::move(cardNodes))
                     })
+                });
+            }
+
+            [[nodiscard]] UIEngine::VNode renderPracticeView(const Json::Array& wordList) const {
+                UIEngine::Props practiceProps;
+                int count = 0;
+                for (const Json& item : wordList) {
+                    if (!item.isObject()) continue;
+                    const Json::Object& obj = item.asObject();
+                    const std::string word = obj.contains("word") && obj.at("word").isString()
+                        ? obj.at("word").asString()
+                        : "";
+                    const std::string translation = obj.contains("translation") && obj.at("translation").isString()
+                        ? obj.at("translation").asString()
+                        : "";
+                    practiceProps["word_" + std::to_string(count)] = word;
+                    practiceProps["trans_" + std::to_string(count)] = translation;
+                    ++count;
+                }
+                practiceProps["total"] = std::to_string(count);
+                return PracticeView(std::move(practiceProps));
+            }
+
+            [[nodiscard]] UIEngine::VNode renderStatsView(const Json::Array& wordList) const {
+                std::size_t totalChars = 0;
+                std::string longestWord = "—";
+                std::size_t maxLen = 0;
+
+                for (const Json& item : wordList) {
+                    if (!item.isObject()) continue;
+                    const Json::Object& obj = item.asObject();
+                    if (obj.contains("word") && obj.at("word").isString()) {
+                        const std::string& w = obj.at("word").asString();
+                        totalChars += w.size();
+                        if (w.size() > maxLen) {
+                            maxLen = w.size();
+                            longestWord = w;
+                        }
+                    }
+                }
+
+                const std::string avgLength = wordList.empty()
+                    ? "0"
+                    : std::to_string(totalChars / wordList.size()) + " chars";
+
+                return UIEngine::Tags::div({{"class", "stats-view"}}, {
+                    UIEngine::Tags::h2({{"class", "deck-heading"}}, "Learning Goals"),
+                    UIEngine::Tags::section({{"class", "goals-section"}}, {
+                        Counter({{"label", "🎯 Daily Goal"}, {"initial", "10"}}),
+                        Counter({{"label", "🔥 Streak Count"}, {"initial", "3"}})
+                    }),
+                    UIEngine::Tags::h2({{"class", "deck-heading"}}, "Deck Statistics"),
+                    UIEngine::Tags::div({{"class", "stats-grid"}}, {
+                        UIEngine::Tags::div({{"class", "stat-box"}}, {
+                            UIEngine::Tags::span({{"class", "stat-label"}}, "TOTAL CARDS"),
+                            UIEngine::Tags::span({{"class", "stat-value"}}, std::to_string(wordList.size()))
+                        }),
+                        UIEngine::Tags::div({{"class", "stat-box"}}, {
+                            UIEngine::Tags::span({{"class", "stat-label"}}, "AVG WORD LENGTH"),
+                            UIEngine::Tags::span({{"class", "stat-value"}}, avgLength)
+                        }),
+                        UIEngine::Tags::div({{"class", "stat-box"}}, {
+                            UIEngine::Tags::span({{"class", "stat-label"}}, "LONGEST WORD"),
+                            UIEngine::Tags::span({{"class", "stat-value"}}, longestWord)
+                        })
+                    })
+                });
+            }
+
+            [[nodiscard]] UIEngine::VNode render() const override {
+                const Json::Array& wordList = _words.get();
+
+                return UIEngine::Tags::main({{"id", "app"}}, {
+                    TopBar({
+                        {"title", "Lorikeet"},
+                        {"count", std::to_string(wordList.size())}
+                    }),
+                    UIEngine::Router({
+                        {"/", [this, &wordList] { return renderDeckView(wordList); }},
+                        {"/deck", [this, &wordList] { return renderDeckView(wordList); }},
+                        {"/practice", [this, &wordList] { return renderPracticeView(wordList); }},
+                        {"/stats", [this, &wordList] { return renderStatsView(wordList); }}
+                    }, "/deck")
                 });
             }
 
@@ -439,7 +723,7 @@ namespace {
                 .rule(".goals-section", {
                     {"display", "flex"},
                     {"gap", "1rem"},
-                    {"margin-bottom", "1.5rem"},
+                    {"margin-bottom", "2rem"},
                     {"flex-wrap", "wrap"}
                 })
                 .rule(".deck-heading", {
@@ -452,6 +736,32 @@ namespace {
                     {"display", "grid"},
                     {"grid-template-columns", "repeat(auto-fill, minmax(210px, 1fr))"},
                     {"gap", "1rem"}
+                })
+                .rule(".stats-grid", {
+                    {"display", "grid"},
+                    {"grid-template-columns", "repeat(auto-fill, minmax(210px, 1fr))"},
+                    {"gap", "1rem"}
+                })
+                .rule(".stat-box", {
+                    {"background", "#ffffff"},
+                    {"border", "2px solid #e5e5e5"},
+                    {"border-bottom", "5px solid #e5e5e5"},
+                    {"border-radius", "1.15rem"},
+                    {"padding", "1.25rem"},
+                    {"display", "flex"},
+                    {"flex-direction", "column"},
+                    {"gap", "0.4rem"}
+                })
+                .rule(".stat-label", {
+                    {"font-size", "0.75rem"},
+                    {"font-weight", "800"},
+                    {"color", "#777777"},
+                    {"letter-spacing", "0.5px"}
+                })
+                .rule(".stat-value", {
+                    {"font-size", "1.55rem"},
+                    {"font-weight", "800"},
+                    {"color", "#1cb0f6"}
                 })
                 .rule(".empty-state", {
                     {"grid-column", "1 / -1"},
@@ -477,6 +787,7 @@ namespace {
                 s.merge(Counter{}.styles());
                 s.merge(AddWordCard{}.styles());
                 s.merge(WordCard{}.styles());
+                s.merge(PracticeView{}.styles());
                 return s;
             }
 
