@@ -45,14 +45,14 @@ namespace UIEngine {
         }
 
         std::string registerEventHandler(const EventHandler& handler) { // Register an EventHandler for the current render pass and return its generated ID
-            auto session = SessionContext::getCurrentSession();
+            const auto session = SessionContext::getCurrentSession();
             if (session) {
-                std::lock_guard<std::recursive_mutex> lock(session->mutex);
+                std::lock_guard lock(session->mutex);
                 const std::string id = "h_" + std::to_string(session->nextHandlerId++);
                 session->handlerRegistry[id] = handler;
                 return id;
             }
-            std::lock_guard<std::mutex> lock(fallbackHandlerMutex);
+            std::lock_guard lock(fallbackHandlerMutex);
             const std::string id = "h_" + std::to_string(fallbackNextHandlerId++);
             fallbackHandlerRegistry[id] = handler;
             return id;
@@ -60,14 +60,14 @@ namespace UIEngine {
 
         HTTPServer::Json renderRootVNode(const std::function<VNode()>& rootFactory) { // Clear handler registry, render the root VNode tree, and serialize it to JSON
             Detail::resetRenderContext();
-            auto session = SessionContext::getCurrentSession();
+            const auto session = SessionContext::getCurrentSession();
             if (session) {
-                std::lock_guard<std::recursive_mutex> lock(session->mutex);
+                std::lock_guard lock(session->mutex);
                 session->handlerRegistry.clear();
                 session->nextHandlerId = 0;
                 return rootFactory().toJson();
             }
-            std::lock_guard<std::mutex> lock(fallbackHandlerMutex);
+            std::lock_guard lock(fallbackHandlerMutex);
             fallbackHandlerRegistry.clear();
             fallbackNextHandlerId = 0;
             return rootFactory().toJson();
@@ -122,10 +122,10 @@ namespace UIEngine {
     }
 
     std::shared_ptr<Session> SessionManager::getOrCreateSession(const std::string& sessionId) { // Get existing session by ID or create a new one
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard lock(_mutex);
         _pruneExpiredSessionsLocked();
 
-        auto it = _sessions.find(sessionId);
+        const auto it = _sessions.find(sessionId);
         if (it != _sessions.end()) {
             it->second->touch();
             return it->second;
@@ -139,8 +139,8 @@ namespace UIEngine {
     }
 
     std::shared_ptr<Session> SessionManager::getSession(const std::string& sessionId) { // Look up existing session by ID, returning nullptr if absent
-        std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _sessions.find(sessionId);
+        std::lock_guard lock(_mutex);
+        const auto it = _sessions.find(sessionId);
         if (it != _sessions.end()) {
             it->second->touch();
             return it->second;
@@ -149,17 +149,17 @@ namespace UIEngine {
     }
 
     void SessionManager::removeSession(const std::string& sessionId) { // Remove and destroy a session by ID
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard lock(_mutex);
         _sessions.erase(sessionId);
     }
 
-    void SessionManager::setTtl(std::chrono::seconds ttl) { // Configure the maximum idle time before an inactive session is pruned
-        std::lock_guard<std::mutex> lock(_mutex);
+    void SessionManager::setTtl(const std::chrono::seconds ttl) { // Configure the maximum idle time before an inactive session is pruned
+        std::lock_guard lock(_mutex);
         _ttl = ttl;
     }
 
     size_t SessionManager::activeSessionCount() { // Return the number of currently tracked active sessions
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard lock(_mutex);
         return _sessions.size();
     }
 
@@ -208,14 +208,14 @@ namespace UIEngine {
     }
 
     FetchResponse fetch(const std::string& urlOrEndpoint, const FetchOptions& options) { // Execute a synchronous HTTP request against the backend API or a full URL
-        const ParsedUrl target = parseHttpUrl(urlOrEndpoint);
+        const auto [host, port, path] = parseHttpUrl(urlOrEndpoint);
 
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
 
         addrinfo* res = nullptr;
-        if (getaddrinfo(target.host.c_str(), target.port.c_str(), &hints, &res) != 0 || !res) {
+        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0 || !res) {
             return FetchResponse{.status = 0, .rawBody = ""};
         }
 
@@ -237,8 +237,8 @@ namespace UIEngine {
 
         const std::string serializedBody = options.body.isNull() ? "" : options.body.dump();
         std::ostringstream reqStream;
-        reqStream << options.method << " " << target.path << " HTTP/1.1\r\n";
-        reqStream << "Host: " << target.host << ":" << target.port << "\r\n";
+        reqStream << options.method << " " << path << " HTTP/1.1\r\n";
+        reqStream << "Host: " << host << ":" << port << "\r\n";
         reqStream << "Connection: close\r\n";
 
         bool hasContentType = false;
@@ -343,16 +343,16 @@ namespace UIEngine {
         }
 
         std::any& getOrInitState(const std::string& key, const std::function<std::any()>& initializer) { // Retrieve a reference to the stored std::any value for key, initializing it if absent
-            auto session = SessionContext::getCurrentSession();
+            const auto session = SessionContext::getCurrentSession();
             if (session) {
-                std::lock_guard<std::recursive_mutex> lock(session->mutex);
+                std::lock_guard lock(session->mutex);
                 auto it = session->stateStore.find(key);
                 if (it == session->stateStore.end()) {
                     it = session->stateStore.emplace(key, initializer()).first;
                 }
                 return it->second;
             }
-            std::lock_guard<std::mutex> lock(fallbackStateMutex);
+            std::lock_guard lock(fallbackStateMutex);
             auto it = fallbackStateStore.find(key);
             if (it == fallbackStateStore.end()) {
                 it = fallbackStateStore.emplace(key, initializer()).first;
@@ -361,13 +361,13 @@ namespace UIEngine {
         }
 
         void setStateValue(const std::string& key, std::any value) { // Overwrite the stored std::any value for key in the persistent state store
-            auto session = SessionContext::getCurrentSession();
+            const auto session = SessionContext::getCurrentSession();
             if (session) {
-                std::lock_guard<std::recursive_mutex> lock(session->mutex);
+                std::lock_guard lock(session->mutex);
                 session->stateStore[key] = std::move(value);
                 return;
             }
-            std::lock_guard<std::mutex> lock(fallbackStateMutex);
+            std::lock_guard lock(fallbackStateMutex);
             fallbackStateStore[key] = std::move(value);
         }
     }
@@ -668,9 +668,9 @@ namespace UIEngine {
     void serveApp(
         HTTPServer::Server& frontend,
         std::function<VNode()> rootFactory,
-        StyleSheet styleSheet,
+        const StyleSheet &styleSheet,
         std::string apiBaseUrl,
-        std::string pageTitle
+        const std::string &pageTitle
     ) { // Register "/", "/styles.css", "/vdom", and "/event" routes on the frontend server to serve the C++ VDOM app
         configuredApiBaseUrl = std::move(apiBaseUrl); // Store the configured backend base URL for UIEngine::fetch
         const std::string htmlShell = buildHtmlShell(pageTitle); // Pre-build the minimal HTML shell
@@ -678,7 +678,7 @@ namespace UIEngine {
 
         frontend.get("/", [htmlShell](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the HTML shell at GET /
             const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
-            auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            const auto session = SessionManager::instance().getOrCreateSession(sessionId);
             SessionContext sessionCtx(session);
             res.setHeader("X-Session-Id", sessionId);
             res.setHeader("Set-Cookie", "lorikeet_session=" + sessionId + "; Path=/; SameSite=Lax");
@@ -694,9 +694,9 @@ namespace UIEngine {
 
         frontend.get("/vdom", [rootFactory](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the live serialized VNode JSON tree at GET /vdom
             const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
-            auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            const auto session = SessionManager::instance().getOrCreateSession(sessionId);
             {
-                std::lock_guard<std::recursive_mutex> lock(session->mutex);
+                std::lock_guard lock(session->mutex);
                 session->mounted = false;
                 session->stateStore.clear();
             }
@@ -707,7 +707,7 @@ namespace UIEngine {
 
         frontend.post("/event", [factory = std::move(rootFactory)](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Dispatch a browser event to its C++ EventHandler and return the re-rendered VNode tree
             const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
-            auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            const auto session = SessionManager::instance().getOrCreateSession(sessionId);
             SessionContext sessionCtx(session);
             res.setHeader("X-Session-Id", sessionId);
 
@@ -737,7 +737,7 @@ namespace UIEngine {
 
             EventHandler targetHandler;
             {
-                std::lock_guard<std::recursive_mutex> lock(session->mutex);
+                std::lock_guard lock(session->mutex);
                 const auto it = session->handlerRegistry.find(handlerId);
                 if (it != session->handlerRegistry.end()) {
                     targetHandler = it->second;

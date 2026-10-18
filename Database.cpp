@@ -8,12 +8,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <ranges>
 #include <set>
 #include <sstream>
 #include <vector>
 
 namespace HTTPServer {
-    Database::Database(std::string path, bool createIfNotExists) : _path(std::move(path)), _createIfNotExists(createIfNotExists) { // Construct Database with the given file path and auto-creation flag, then load data
+    Database::Database(std::string path, const bool createIfNotExists) : _path(std::move(path)), _createIfNotExists(createIfNotExists) { // Construct Database with the given file path and auto-creation flag, then load data
         _load(); // Load and parse database content from disk into memory
     }
 
@@ -129,7 +130,7 @@ namespace HTTPServer {
         const Json::Object& scheme = tableObj.at("scheme").asObject(); // Retrieve a const reference to the table schema definition
         Json::Array records = tableObj.at("records").asArray(); // Retrieve a copy of the existing records array
 
-        for (const auto& [key, _] : record) { // Iterate over all keys provided in the input record
+        for (const auto& key : record | std::views::keys) { // Iterate over all keys provided in the input record
             if (!scheme.contains(key)) { // Check if the key corresponds to a defined column in the table schema
                 throw std::invalid_argument("Unknown column '" + key + "' in table '" + tableName + "'"); // Throw exception for unknown column names
             }
@@ -400,7 +401,7 @@ namespace HTTPServer {
             if (!isUnique) continue; // Skip columns that do not require unique values
 
             const std::string serializedVal = newVal.dump(); // Serialize the new value for exact equality comparison
-            for (size_t idx : updatedIndices) { // Check each modified record against all other records in the table
+            for (const size_t idx : updatedIndices) { // Check each modified record against all other records in the table
                 for (size_t j = 0; j < records.size(); ++j) { // Iterate over all records in the working array
                     if (idx == j) continue; // Do not compare a record against itself
                     const Json::Object& otherRow = records[j].asObject(); // Extract the other record's object map

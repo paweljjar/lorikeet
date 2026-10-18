@@ -59,7 +59,7 @@ namespace HTTPServer {
             const std::string& getName() const; // Return the configured name of the server
 
             static void sendJson(ServerResponse& res, int status, const Json& json, int indent = -1); // Helper to serialize a Json object, set Content-Type to application/json, and set status code
-            static void sendHtml(ServerResponse& res, int status, const std::string html); // Helper to set Content-Type to text/html and set status code
+            static void sendHtml(ServerResponse& res, int status, const std::string &html); // Helper to set Content-Type to text/html and set status code
 
         private:
             int _port; // Port number on which the server listens for incoming connections

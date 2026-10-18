@@ -153,16 +153,16 @@ namespace UIEngine {
     template <typename T>
     class State { // React-style persistent component state handle backed by the server-side state store
         public:
-            explicit State(std::string key, T initialValue = {})
+            explicit State(const std::string &key, T initialValue = {})
                 : _key(Detail::resolveStateKey(key)), _initialValue(std::move(initialValue)) { // Register or look up the persistent state slot by key
-                Detail::getOrInitState(_key, [init = _initialValue]() { return std::any(init); });
+                Detail::getOrInitState(_key, [init = _initialValue] { return std::any(init); });
             }
 
-            State(const Component* owner, std::string key, T initialValue = {}); // Construct a state handle explicitly bound to a component instance scope
+            State(const Component* owner, const std::string &key, T initialValue = {}); // Construct a state handle explicitly bound to a component instance scope
 
             [[nodiscard]] const std::string& key() const { return _key; } // Return the fully resolved state key
             [[nodiscard]] const T& get() const { // Read the current value stored for this state key
-                return std::any_cast<const T&>(Detail::getOrInitState(_key, [init = _initialValue]() { return std::any(init); }));
+                return std::any_cast<const T&>(Detail::getOrInitState(_key, [init = _initialValue] { return std::any(init); }));
             }
 
             void set(T newValue) const { // Update the stored value for this state key (usable inside const render() lambdas)
@@ -240,9 +240,9 @@ namespace UIEngine {
     };
 
     template <typename T>
-    State<T>::State(const Component* owner, std::string key, T initialValue)
+    State<T>::State(const Component* owner, const std::string &key, T initialValue)
         : _key(owner ? owner->scopeKey(key) : Detail::resolveStateKey(key)), _initialValue(std::move(initialValue)) {
-        Detail::getOrInitState(_key, [init = _initialValue]() { return std::any(init); });
+        Detail::getOrInitState(_key, [init = _initialValue] { return std::any(init); });
     }
 
     template <typename CompT, typename... Args>
@@ -256,9 +256,9 @@ namespace UIEngine {
     void serveApp(
         HTTPServer::Server& frontend,
         std::function<VNode()> rootFactory,
-        StyleSheet styleSheet = {},
+        const StyleSheet &styleSheet = {},
         std::string apiBaseUrl = "http://localhost:8000",
-        std::string pageTitle = "App"
+        const std::string &pageTitle = "App"
     );
 
     // Overload of serveApp that accepts a root Component subclass directly, runs onMount() once, and automatically extracts its styles()
@@ -267,7 +267,7 @@ namespace UIEngine {
     void serveApp(
         HTTPServer::Server& frontend,
         CompT rootComponent,
-        StyleSheet styleSheet = {},
+        const StyleSheet& styleSheet = {},
         std::string apiBaseUrl = "http://localhost:8000",
         std::string pageTitle = "App"
     ) {
@@ -276,7 +276,7 @@ namespace UIEngine {
         serveApp(
             frontend,
             [comp = std::move(rootComponent)]() mutable {
-                auto session = SessionContext::getCurrentSession();
+                const auto session = SessionContext::getCurrentSession();
                 if (session) {
                     if (!session->mounted) {
                         session->mounted = true;
