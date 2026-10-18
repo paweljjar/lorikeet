@@ -65,6 +65,84 @@ class TopBar : public UIEngine::Component { // Friendly gamified header bar with
         }
 };
 
+class Counter : public UIEngine::Component { // Reusable stateful counter demonstrating scoped multi-instance isolation
+    public:
+        using UIEngine::Component::Component;
+
+        [[nodiscard]] std::string getComponentName() const override { return "Counter"; }
+
+        [[nodiscard]] UIEngine::VNode render() const override {
+            const std::string label = getProp("label", "Counter");
+            UIEngine::State<int> count = useState<int>("count", 0);
+
+            return UIEngine::Tags::div({{"class", "counter-card"}}, {
+                UIEngine::Tags::span({{"class", "counter-label"}}, label),
+                UIEngine::Tags::div({{"class", "counter-controls"}}, {
+                    UIEngine::Tags::button({
+                        {"class", "btn-counter"},
+                        {"onClick", [count]() { count.set(count.get() - 1); }}
+                    }, "-"),
+                    UIEngine::Tags::span({{"class", "counter-value"}}, std::to_string(count.get())),
+                    UIEngine::Tags::button({
+                        {"class", "btn-counter"},
+                        {"onClick", [count]() { count.set(count.get() + 1); }}
+                    }, "+")
+                })
+            });
+        }
+
+        [[nodiscard]] UIEngine::StyleSheet styles() const override {
+            UIEngine::StyleSheet s;
+            s.rule(".counter-card", {
+                {"background", "#ffffff"},
+                {"border", "2px solid #e5e5e5"},
+                {"border-bottom", "4px solid #e5e5e5"},
+                {"border-radius", "1rem"},
+                {"padding", "0.85rem 1.15rem"},
+                {"display", "flex"},
+                {"justify-content", "space-between"},
+                {"align-items", "center"},
+                {"flex", "1 1 200px"}
+            })
+            .rule(".counter-label", {
+                {"font-weight", "800"},
+                {"font-size", "0.95rem"},
+                {"color", "#4b4b4b"}
+            })
+            .rule(".counter-controls", {
+                {"display", "flex"},
+                {"align-items", "center"},
+                {"gap", "0.75rem"}
+            })
+            .rule(".counter-value", {
+                {"font-size", "1.2rem"},
+                {"font-weight", "800"},
+                {"min-width", "2rem"},
+                {"text-align", "center"},
+                {"color", "#1cb0f6"}
+            })
+            .rule(".btn-counter", {
+                {"background", "#f0f0f0"},
+                {"border", "2px solid #e0e0e0"},
+                {"border-radius", "0.6rem"},
+                {"width", "2.1rem"},
+                {"height", "2.1rem"},
+                {"font-size", "1.1rem"},
+                {"font-weight", "800"},
+                {"cursor", "pointer"},
+                {"color", "#4b4b4b"},
+                {"display", "flex"},
+                {"align-items", "center"},
+                {"justify-content", "center"},
+                {"transition", "background 0.1s"}
+            })
+            .rule(".btn-counter:hover", {
+                {"background", "#e2e2e2"}
+            });
+            return s;
+        }
+};
+
 class AddWordCard : public UIEngine::Component { // Tactile card with form to add a new word and translation via C++ onSubmit handler
     public:
         using UIEngine::Component::Component;
@@ -315,6 +393,10 @@ class App : public UIEngine::Component { // Stateful C++ frontend application co
                     {"title", "Lorikeet"},
                     {"count", std::to_string(wordList.size())}
                 }),
+                UIEngine::Tags::section({{"class", "goals-section"}}, {
+                    Counter({{"label", "🎯 Daily Goal"}}),
+                    Counter({{"label", "🔥 Streak Count"}})
+                }),
                 AddWordCard({
                     {"onAdded", [this]() { refreshWords(); }}
                 }),
@@ -340,6 +422,12 @@ class App : public UIEngine::Component { // Stateful C++ frontend application co
             .rule("#root", {
                 {"max-width", "760px"},
                 {"margin", "0 auto"}
+            })
+            .rule(".goals-section", {
+                {"display", "flex"},
+                {"gap", "1rem"},
+                {"margin-bottom", "1.5rem"},
+                {"flex-wrap", "wrap"}
             })
             .rule(".deck-heading", {
                 {"font-size", "1.3rem"},
@@ -373,6 +461,7 @@ class App : public UIEngine::Component { // Stateful C++ frontend application co
             });
 
             s.merge(TopBar{}.styles());
+            s.merge(Counter{}.styles());
             s.merge(AddWordCard{}.styles());
             s.merge(WordCard{}.styles());
             return s;

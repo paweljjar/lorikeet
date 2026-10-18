@@ -207,7 +207,7 @@ namespace HTTPServer {
         this->_address.sin_port = htons(this->_port); // Set the port number for the socket, converting it to network byte order using htons (host-to-network short)
 
         if (bind(this->_server_fd, reinterpret_cast<sockaddr*>(&this->_address), sizeof(this->_address)) == -1) { // Attempt to bind the socket to the specified address and port, checking for errors (bind returns -1 on failure)
-            _logError("Failed to bind socket"); // Print an error message to standard error indicating that the socket binding failed
+            _logError("Failed to bind socket: " + std::string(strerror(errno))); // Print an error message with errno
             return false;
         }
 

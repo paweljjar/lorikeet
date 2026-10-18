@@ -231,6 +231,7 @@ namespace UIEngine {
 
         protected:
             Props _props; // Component properties passed in at construction time
+            mutable std::string _instanceKey; // Cached instance scope key for this component
 
             [[nodiscard]] bool hasProp(const std::string& key) const; // Check whether a specific property key was provided to this component
             [[nodiscard]] std::string getProp(const std::string& key, const std::string& fallback = "") const; // Retrieve a string property value by key, or return fallback if absent

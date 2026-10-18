@@ -318,7 +318,7 @@ namespace UIEngine {
                 return rawKey.substr(1);
             }
             const std::string scope = getCurrentScope();
-            if (scope.empty()) {
+            if (scope.empty() || rawKey.starts_with(scope + ".")) {
                 return rawKey;
             }
             return scope + "." + rawKey;
@@ -466,13 +466,17 @@ namespace UIEngine {
     }
 
     std::string Component::getComponentKey() const { // Determine unique scope identifier for this component instance
+        if (!_instanceKey.empty()) {
+            return _instanceKey;
+        }
         std::string explicitKey;
         if (hasProp("key")) {
             explicitKey = getProp("key");
         } else if (hasProp("id")) {
             explicitKey = getProp("id");
         }
-        return Detail::generateComponentKey(getComponentName(), explicitKey);
+        _instanceKey = Detail::generateComponentKey(getComponentName(), explicitKey);
+        return _instanceKey;
     }
 
     std::string Component::scopeKey(const std::string& key) const { // Resolve a state key prefixed with this component instance scope
@@ -505,24 +509,18 @@ namespace UIEngine {
     <div id="root"></div>
     <script>
         let currentVNode = null;
+        let currentSessionId = (window.crypto && window.crypto.randomUUID)
+            ? window.crypto.randomUUID().replace(/-/g, "")
+            : "tab_" + Math.random().toString(36).substring(2) + Date.now().toString(36);
 
         function getSessionId() {
-            let sid = sessionStorage.getItem("lorikeet_session_id");
-            if (!sid) {
-                if (window.crypto && window.crypto.randomUUID) {
-                    sid = window.crypto.randomUUID().replace(/-/g, "");
-                } else {
-                    sid = "tab_" + Math.random().toString(36).substring(2) + Date.now().toString(36);
-                }
-                sessionStorage.setItem("lorikeet_session_id", sid);
-            }
-            return sid;
+            return currentSessionId;
         }
 
         function syncSessionId(res) {
             const serverSid = res.headers ? res.headers.get("X-Session-Id") : null;
             if (serverSid) {
-                sessionStorage.setItem("lorikeet_session_id", serverSid);
+                currentSessionId = serverSid;
             }
         }
 
@@ -697,6 +695,11 @@ namespace UIEngine {
         frontend.get("/vdom", [rootFactory](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the live serialized VNode JSON tree at GET /vdom
             const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
             auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            {
+                std::lock_guard<std::recursive_mutex> lock(session->mutex);
+                session->mounted = false;
+                session->stateStore.clear();
+            }
             SessionContext sessionCtx(session);
             res.setHeader("X-Session-Id", sessionId);
             HTTPServer::Server::sendJson(res, HTTP_OK, renderRootVNode(rootFactory));
