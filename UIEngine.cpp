@@ -25,12 +25,30 @@ namespace UIEngine {
         std::mutex fallbackStateMutex; // Mutex guarding fallback state and mounted component maps when running outside an active session context
         std::map<std::string, std::any> fallbackStateStore; // Fallback state storage for non-session or startup state access
         std::map<std::string, std::function<void()>> fallbackMountedComponents; // Fallback registry of mounted components outside an active session
+        std::string fallbackCurrentPath = "/"; // Fallback route path when running outside an active session context
 
         std::mutex fallbackHandlerMutex; // Mutex guarding fallback handler registry
         std::map<std::string, EventHandler> fallbackHandlerRegistry; // Fallback handler registry
         size_t fallbackNextHandlerId = 0; // Fallback handler ID counter
 
         std::string configuredApiBaseUrl = "http://localhost:8000"; // Default base URL used to resolve relative endpoints in UIEngine::fetch
+
+        std::string normalizeRoutePath(std::string path) { // Normalize a route path to start with '/' and strip trailing slashes (except "/")
+            if (path.empty()) {
+                return "/";
+            }
+            const size_t queryPos = path.find('?');
+            if (queryPos != std::string::npos) {
+                path = path.substr(0, queryPos);
+            }
+            if (path.empty() || path.front() != '/') {
+                path = "/" + path;
+            }
+            while (path.size() > 1 && path.back() == '/') {
+                path.pop_back();
+            }
+            return path;
+        }
 
         void sortUnmountOrder(std::vector<std::string>& keys) { // Sort component scope keys deepest-first so children unmount before parents
             std::sort(keys.begin(), keys.end(), [](const std::string& a, const std::string& b) {
@@ -159,6 +177,28 @@ namespace UIEngine {
 
     void Session::touch() { // Update lastAccessed timestamp to current steady clock time
         lastAccessed = std::chrono::steady_clock::now();
+    }
+
+    std::string currentPath() { // Retrieve the normalized active client-side route path for the current session
+        const auto session = SessionContext::getCurrentSession();
+        if (session) {
+            std::lock_guard lock(session->mutex);
+            return normalizeRoutePath(session->currentPath);
+        }
+        std::lock_guard lock(fallbackStateMutex);
+        return normalizeRoutePath(fallbackCurrentPath);
+    }
+
+    void navigate(std::string path) { // Update the active client-side route path for the current session
+        std::string normalized = normalizeRoutePath(std::move(path));
+        const auto session = SessionContext::getCurrentSession();
+        if (session) {
+            std::lock_guard lock(session->mutex);
+            session->currentPath = std::move(normalized);
+            return;
+        }
+        std::lock_guard lock(fallbackStateMutex);
+        fallbackCurrentPath = std::move(normalized);
     }
 
     SessionManager& SessionManager::instance() { // Retrieve the singleton instance of SessionManager
@@ -653,6 +693,70 @@ namespace UIEngine {
         return render();
     }
 
+    VNode Router(const std::vector<Route>& routes, const std::string& fallbackPath) { // Match currentPath() against routes and render the active route's VNode
+        const std::string activePath = currentPath();
+        const Route* wildcardRoute = nullptr;
+        const Route* fallbackRoute = nullptr;
+        const std::string normalizedFallback = normalizeRoutePath(fallbackPath);
+
+        for (const auto& route : routes) {
+            if (route.path == "*") {
+                wildcardRoute = &route;
+                continue;
+            }
+            const std::string routePath = normalizeRoutePath(route.path);
+            if (routePath == activePath && route.render) {
+                return route.render();
+            }
+            if (routePath == normalizedFallback) {
+                fallbackRoute = &route;
+            }
+        }
+
+        if (wildcardRoute && wildcardRoute->render) {
+            return wildcardRoute->render();
+        }
+        if (fallbackRoute && fallbackRoute->render) {
+            navigate(normalizedFallback);
+            return fallbackRoute->render();
+        }
+        if (!routes.empty() && routes.front().render) {
+            return routes.front().render();
+        }
+        return Tags::div();
+    }
+
+    VNode Link(const std::string& to, const std::string& text, Props props) { // Create a client-side navigation <a> element that switches routes without reloading the page
+        const std::string targetPath = normalizeRoutePath(to);
+        const std::string activePath = currentPath();
+        const bool isActive = (activePath == targetPath) || (activePath == "/" && props.contains("defaultActive") && props.at("defaultActive").isString() && props.at("defaultActive").asString() == "true");
+        props.erase("defaultActive");
+
+        std::string className = "nav-link";
+        if (const auto classIt = props.find("class"); classIt != props.end() && classIt->second.isString()) {
+            className = classIt->second.asString();
+        }
+        if (isActive) {
+            className += " active";
+        }
+        props["class"] = className;
+        props["href"] = targetPath;
+        props["data-link"] = "true";
+
+        EventHandler userOnClick;
+        if (const auto clickIt = props.find("onClick"); clickIt != props.end() && clickIt->second.isHandler()) {
+            userOnClick = clickIt->second.asHandler();
+        }
+        props["onClick"] = [targetPath, userOnClick](const Event& e) {
+            navigate(targetPath);
+            if (userOnClick) {
+                userOnClick(e);
+            }
+        };
+
+        return Tags::a(std::move(props), text);
+    }
+
     namespace {
         std::string buildHtmlShell(const std::string& pageTitle) { // Build the minimal HTML shell containing the Virtual DOM renderer and C++ event bridge
             std::ostringstream html;
@@ -681,6 +785,10 @@ namespace UIEngine {
             if (serverSid) {
                 currentSessionId = serverSid;
             }
+            const serverRoute = res.headers ? res.headers.get("X-Route-Path") : null;
+            if (serverRoute && window.location.pathname !== serverRoute) {
+                window.history.pushState({}, "", serverRoute);
+            }
         }
 
         function renderTree(nextVNode) {
@@ -693,6 +801,31 @@ namespace UIEngine {
                 patchDom(root, currentVNode, nextVNode, 0);
             }
             currentVNode = nextVNode;
+        }
+
+        async function navigateTo(path, pushState = true) {
+            try {
+                const targetPath = path || "/";
+                if (pushState && window.location.pathname !== targetPath) {
+                    window.history.pushState({}, "", targetPath);
+                }
+                const sid = getSessionId();
+                const res = await fetch("/navigate", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Session-Id": sid
+                    },
+                    body: JSON.stringify({ path: targetPath })
+                });
+                syncSessionId(res);
+                if (res.ok) {
+                    const nextVNode = await res.json();
+                    renderTree(nextVNode);
+                }
+            } catch (err) {
+                console.error("Route navigation failed:", err);
+            }
         }
 
         async function dispatchEvent(handlerId, eventPayload) {
@@ -711,9 +844,11 @@ namespace UIEngine {
                     const nextVNode = await res.json();
                     renderTree(nextVNode);
                 } else if (res.status === 404) {
-                    const vdomRes = await fetch("/vdom", {
+                    const currentPath = encodeURIComponent(window.location.pathname || "/");
+                    const vdomRes = await fetch("/vdom?path=" + currentPath, {
                         headers: { "X-Session-Id": sid }
                     });
+                    syncSessionId(vdomRes);
                     if (vdomRes.ok) {
                         renderTree(await vdomRes.json());
                     }
@@ -747,7 +882,18 @@ namespace UIEngine {
                         el.reset();
                     };
                 } else if (key === "data-on-click") {
-                    el.onclick = async () => {
+                    el.onclick = async (e) => {
+                        const isLink = el.getAttribute("data-link") === "true" || newProps["data-link"] === "true";
+                        if (isLink) {
+                            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || (e.button && e.button !== 0)) {
+                                return;
+                            }
+                            e.preventDefault();
+                            const href = el.getAttribute("href") || newProps["href"] || "/";
+                            if (window.location.pathname !== href) {
+                                window.history.pushState({}, "", href);
+                            }
+                        }
                         await dispatchEvent(value, { type: "click" });
                     };
                 } else if (key === "data-on-input") {
@@ -806,7 +952,8 @@ namespace UIEngine {
 
         async function initApp() {
             const sid = getSessionId();
-            const res = await fetch("/vdom", {
+            const initialPath = encodeURIComponent(window.location.pathname || "/");
+            const res = await fetch("/vdom?path=" + initialPath, {
                 headers: { "X-Session-Id": sid }
             });
             syncSessionId(res);
@@ -815,6 +962,10 @@ namespace UIEngine {
                 renderTree(initialVNode);
             }
         }
+
+        window.addEventListener("popstate", () => {
+            navigateTo(window.location.pathname || "/", false);
+        });
 
         window.addEventListener("DOMContentLoaded", initApp);
     </script>
@@ -830,19 +981,27 @@ namespace UIEngine {
         const StyleSheet &styleSheet,
         std::string apiBaseUrl,
         const std::string &pageTitle
-    ) { // Register "/", "/styles.css", "/vdom", and "/event" routes on the frontend server to serve the C++ VDOM app
+    ) { // Register "/", "/styles.css", "/vdom", "/navigate", and "/event" routes on the frontend server to serve the C++ VDOM app
         configuredApiBaseUrl = std::move(apiBaseUrl); // Store the configured backend base URL for UIEngine::fetch
         const std::string htmlShell = buildHtmlShell(pageTitle); // Pre-build the minimal HTML shell
         const std::string cssContent = styleSheet.toCss(); // Serialize the C++ StyleSheet into a CSS string
 
-        frontend.get("/", [htmlShell](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the HTML shell at GET /
+        const auto serveHtmlShell = [htmlShell](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the HTML shell for GET / and any SPA client-side route
             const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
             const auto session = SessionManager::instance().getOrCreateSession(sessionId);
             SessionContext sessionCtx(session);
+            {
+                std::lock_guard lock(session->mutex);
+                session->currentPath = normalizeRoutePath(req.path);
+            }
             res.setHeader("X-Session-Id", sessionId);
+            res.setHeader("X-Route-Path", currentPath());
             res.setHeader("Set-Cookie", "lorikeet_session=" + sessionId + "; Path=/; SameSite=Lax");
             HTTPServer::Server::sendHtml(res, HTTP_OK, htmlShell);
-        });
+        };
+
+        frontend.get("/", serveHtmlShell);
+        frontend.setFallbackGetHandler(serveHtmlShell);
 
         frontend.get("/styles.css", [cssContent](const HTTPServer::ServerRequest&, HTTPServer::ServerResponse& res) { // Serve the generated CSS stylesheet at GET /styles.css
             res.status = HTTP_OK;
@@ -857,11 +1016,32 @@ namespace UIEngine {
             SessionContext sessionCtx(session);
             {
                 std::lock_guard lock(session->mutex);
+                if (req.hasQuery("path")) {
+                    session->currentPath = normalizeRoutePath(req.getQuery("path"));
+                }
                 Detail::unmountAllComponents(*session);
                 session->stateStore.clear();
             }
+            const HTTPServer::Json vdomJson = renderRootVNode(rootFactory);
             res.setHeader("X-Session-Id", sessionId);
-            HTTPServer::Server::sendJson(res, HTTP_OK, renderRootVNode(rootFactory));
+            res.setHeader("X-Route-Path", currentPath());
+            HTTPServer::Server::sendJson(res, HTTP_OK, vdomJson);
+        });
+
+        frontend.post("/navigate", [rootFactory](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Switch the active client-side route without resetting session state and return the re-rendered VNode tree
+            const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
+            const auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            SessionContext sessionCtx(session);
+
+            const HTTPServer::Json payload = HTTPServer::Json::parse(req.body);
+            if (payload.isObject() && payload.asObject().contains("path") && payload.asObject().at("path").isString()) {
+                navigate(payload.asObject().at("path").asString());
+            }
+
+            const HTTPServer::Json vdomJson = renderRootVNode(rootFactory);
+            res.setHeader("X-Session-Id", sessionId);
+            res.setHeader("X-Route-Path", currentPath());
+            HTTPServer::Server::sendJson(res, HTTP_OK, vdomJson);
         });
 
         frontend.post("/event", [factory = std::move(rootFactory)](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Dispatch a browser event to its C++ EventHandler and return the re-rendered VNode tree
@@ -905,8 +1085,11 @@ namespace UIEngine {
 
             if (targetHandler) {
                 targetHandler(event);
-                HTTPServer::Server::sendJson(res, HTTP_OK, renderRootVNode(factory));
+                const HTTPServer::Json vdomJson = renderRootVNode(factory);
+                res.setHeader("X-Route-Path", currentPath());
+                HTTPServer::Server::sendJson(res, HTTP_OK, vdomJson);
             } else {
+                res.setHeader("X-Route-Path", currentPath());
                 HTTPServer::Server::sendJson(res, HTTP_NOT_FOUND, HTTPServer::Json::Object{{"error", "Unknown or expired handler ID"}});
             }
         });
@@ -929,6 +1112,10 @@ namespace UIEngine {
             return VNode::el("header", std::move(props), std::move(children));
         }
 
+        VNode nav(Props props, std::vector<VNode> children) { // Create a <nav> semantic navigation container element with props and child VNodes
+            return VNode::el("nav", std::move(props), std::move(children));
+        }
+
         VNode main(Props props, std::vector<VNode> children) { // Create a <main> semantic element with props and child VNodes
             return VNode::el("main", std::move(props), std::move(children));
         }
@@ -947,6 +1134,14 @@ namespace UIEngine {
 
         VNode form(Props props, std::vector<VNode> children) { // Create a <form> element with props and child VNodes
             return VNode::el("form", std::move(props), std::move(children));
+        }
+
+        VNode a(Props props, std::vector<VNode> children) { // Create an <a> anchor element with props and child VNodes
+            return VNode::el("a", std::move(props), std::move(children));
+        }
+
+        VNode a(Props props, std::string text) { // Create an <a> anchor element containing a single text label
+            return VNode::el("a", std::move(props), {VNode::textNode(std::move(text))});
         }
 
         VNode h1(Props props, std::string text) { // Create an <h1> heading element containing a single text node

@@ -55,6 +55,7 @@ namespace HTTPServer {
             std::thread startAsync(); // Start the server asynchronously on a background thread and return the thread handle
             void get(const std::string& path, RequestHandler handler); // Register a route handler callback for HTTP GET requests at the given path
             void post(const std::string& path, RequestHandler handler); // Register a route handler callback for HTTP POST requests at the given path
+            void setFallbackGetHandler(RequestHandler handler); // Register a fallback handler for unmatched HTTP GET requests (e.g. SPA client-side routes)
             int getPort() const; // Return the configured port number the server listens on
             const std::string& getName() const; // Return the configured name of the server
 
@@ -67,6 +68,7 @@ namespace HTTPServer {
             int _server_fd; // Socket file descriptor for the server listener
             sockaddr_in _address; // Socket address structure holding IPv4 address and port configuration
             std::map<std::string, std::map<std::string, RequestHandler>> _routes; // Routing table mapping HTTP method to path to corresponding handler function
+            RequestHandler _fallbackGetHandler; // Optional fallback handler invoked when an HTTP GET request path is not explicitly registered
 
             static constexpr int MAX_HEADER_SIZE = 16 * 1024; // Maximum allowed size for raw HTTP request headers (16 KB)
             static constexpr int MAX_BODY_SIZE = 1024 * 1024; // Maximum allowed size for HTTP request body payload (1 MB)
