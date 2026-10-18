@@ -605,7 +605,7 @@ namespace UIEngine {
     }
 
     VNode VNode::textNode(std::string content) { // Create a raw text VNode with tag "#text" and the given text content
-        return VNode{.tag = "#text", .props = {}, .text = std::move(content), .children = {}, .key = ""}; // Initialize VNode with "#text" tag, empty props, moved text, and no children
+        return VNode("#text", {}, std::move(content), {}, ""); // Initialize VNode with "#text" tag, empty props, moved text, and no children
     }
 
     VNode VNode::el(std::string tag, Props props, std::vector<VNode> children) { // Create an HTML element VNode with tag, attributes, and child nodes
@@ -617,7 +617,7 @@ namespace UIEngine {
             }
             props.erase(it); // Remove "key" so it is not emitted as a DOM HTML attribute
         }
-        return VNode{.tag = std::move(tag), .props = std::move(props), .text = "", .children = std::move(children), .key = std::move(extractedKey)}; // Initialize VNode with moved tag, props, empty text, moved children, and extracted key
+        return VNode(std::move(tag), std::move(props), "", std::move(children), std::move(extractedKey)); // Initialize VNode with moved tag, props, empty text, moved children, and extracted key
     }
 
     HTTPServer::Json VNode::toJson() const { // Recursively serialize this VNode and its children into an HTTPServer::Json object

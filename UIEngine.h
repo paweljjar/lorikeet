@@ -206,8 +206,8 @@ namespace UIEngine {
         std::string key = ""; // Optional unique reconciliation key for keyed DOM diffing
 
         VNode() = default; // Default constructor creating an empty VNode
-        VNode(std::string tag, Props props, std::string text, std::vector<VNode> children)
-            : tag(std::move(tag)), props(std::move(props)), text(std::move(text)), children(std::move(children)) {} // Construct a VNode from tag, props, text, and children
+        VNode(std::string tag, Props props, std::string text, std::vector<VNode> children, std::string key = "")
+            : tag(std::move(tag)), props(std::move(props)), text(std::move(text)), children(std::move(children)), key(std::move(key)) {} // Construct a VNode from tag, props, text, children, and optional key
 
         template <typename CompT>
         requires (std::derived_from<std::decay_t<CompT>, Component> && !std::same_as<std::decay_t<CompT>, Component>)
@@ -271,7 +271,11 @@ namespace UIEngine {
         Detail::registerComponentMount(key, *instanceCopy, [instanceCopy] {
             instanceCopy->onUnmount();
         });
-        return instanceCopy->render();
+        VNode node = instanceCopy->render();
+        if (node.key.empty()) {
+            node.key = key;
+        }
+        return node;
     }
 
     template <typename CompT>
