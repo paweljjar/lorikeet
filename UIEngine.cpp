@@ -13,13 +13,20 @@
 
 namespace UIEngine {
     namespace {
-        std::mutex stateStoreMutex; // Mutex guarding concurrent access to the server-side component state store
-        std::map<std::string, std::any> stateStore; // Persistent key-value map storing component state values across renders
-        std::string configuredApiBaseUrl = "http://localhost:8000"; // Default base URL used to resolve relative endpoints in UIEngine::fetch
+        thread_local std::shared_ptr<Session> currentThreadSession = nullptr; // Active Session bound to the current executing thread
+        thread_local std::string currentThreadSessionId; // Active session ID string bound to the current executing thread
 
-        std::mutex handlerMutex; // Mutex guarding the server-side event handler registry and render passes
-        std::map<std::string, EventHandler> handlerRegistry; // Map of generated handler IDs ("h_0", "h_1", ...) to C++ EventHandler callbacks
-        size_t nextHandlerId = 0; // Monotonically increasing counter reset on each full root render pass
+        thread_local std::vector<std::string> threadScopeStack; // Thread-local component hierarchy scope stack
+        thread_local std::map<std::string, size_t> threadChildIndexMap; // Thread-local component occurrence counters per render pass
+
+        std::mutex fallbackStateMutex; // Mutex guarding fallback state map when running outside an active session context
+        std::map<std::string, std::any> fallbackStateStore; // Fallback state storage for non-session or startup state access
+
+        std::mutex fallbackHandlerMutex; // Mutex guarding fallback handler registry
+        std::map<std::string, EventHandler> fallbackHandlerRegistry; // Fallback handler registry
+        size_t fallbackNextHandlerId = 0; // Fallback handler ID counter
+
+        std::string configuredApiBaseUrl = "http://localhost:8000"; // Default base URL used to resolve relative endpoints in UIEngine::fetch
 
         std::string normalizeEventAttr(const std::string& propName) { // Map C++ event prop names (e.g., "onClick") to DOM data attributes (e.g., "data-on-click")
             if (propName == "onClick" || propName == "onclick" || propName == "data-on-click") {
@@ -38,15 +45,31 @@ namespace UIEngine {
         }
 
         std::string registerEventHandler(const EventHandler& handler) { // Register an EventHandler for the current render pass and return its generated ID
-            const std::string id = "h_" + std::to_string(nextHandlerId++);
-            handlerRegistry[id] = handler;
+            const auto session = SessionContext::getCurrentSession();
+            if (session) {
+                std::lock_guard lock(session->mutex);
+                const std::string id = "h_" + std::to_string(session->nextHandlerId++);
+                session->handlerRegistry[id] = handler;
+                return id;
+            }
+            std::lock_guard lock(fallbackHandlerMutex);
+            const std::string id = "h_" + std::to_string(fallbackNextHandlerId++);
+            fallbackHandlerRegistry[id] = handler;
             return id;
         }
 
         HTTPServer::Json renderRootVNode(const std::function<VNode()>& rootFactory) { // Clear handler registry, render the root VNode tree, and serialize it to JSON
-            std::lock_guard<std::mutex> lock(handlerMutex);
-            handlerRegistry.clear();
-            nextHandlerId = 0;
+            Detail::resetRenderContext();
+            const auto session = SessionContext::getCurrentSession();
+            if (session) {
+                std::lock_guard lock(session->mutex);
+                session->handlerRegistry.clear();
+                session->nextHandlerId = 0;
+                return rootFactory().toJson();
+            }
+            std::lock_guard lock(fallbackHandlerMutex);
+            fallbackHandlerRegistry.clear();
+            fallbackNextHandlerId = 0;
             return rootFactory().toJson();
         }
 
@@ -89,6 +112,90 @@ namespace UIEngine {
         }
     }
 
+    void Session::touch() { // Update lastAccessed timestamp to current steady clock time
+        lastAccessed = std::chrono::steady_clock::now();
+    }
+
+    SessionManager& SessionManager::instance() { // Retrieve the singleton instance of SessionManager
+        static SessionManager mgr;
+        return mgr;
+    }
+
+    std::shared_ptr<Session> SessionManager::getOrCreateSession(const std::string& sessionId) { // Get existing session by ID or create a new one
+        std::lock_guard lock(_mutex);
+        _pruneExpiredSessionsLocked();
+
+        const auto it = _sessions.find(sessionId);
+        if (it != _sessions.end()) {
+            it->second->touch();
+            return it->second;
+        }
+
+        auto session = std::make_shared<Session>();
+        session->id = sessionId;
+        session->touch();
+        _sessions[sessionId] = session;
+        return session;
+    }
+
+    std::shared_ptr<Session> SessionManager::getSession(const std::string& sessionId) { // Look up existing session by ID, returning nullptr if absent
+        std::lock_guard lock(_mutex);
+        const auto it = _sessions.find(sessionId);
+        if (it != _sessions.end()) {
+            it->second->touch();
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    void SessionManager::removeSession(const std::string& sessionId) { // Remove and destroy a session by ID
+        std::lock_guard lock(_mutex);
+        _sessions.erase(sessionId);
+    }
+
+    void SessionManager::setTtl(const std::chrono::seconds ttl) { // Configure the maximum idle time before an inactive session is pruned
+        std::lock_guard lock(_mutex);
+        _ttl = ttl;
+    }
+
+    size_t SessionManager::activeSessionCount() { // Return the number of currently tracked active sessions
+        std::lock_guard lock(_mutex);
+        return _sessions.size();
+    }
+
+    void SessionManager::_pruneExpiredSessionsLocked() { // Prune sessions that have exceeded the configured TTL (must hold _mutex)
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = _sessions.begin(); it != _sessions.end(); ) {
+            if (now - it->second->lastAccessed > _ttl) {
+                it = _sessions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    SessionContext::SessionContext(std::shared_ptr<Session> session) // Set current active session on this thread
+        : _prevSession(currentThreadSession), _prevId(currentThreadSessionId) {
+        currentThreadSession = std::move(session);
+        currentThreadSessionId = currentThreadSession ? currentThreadSession->id : "";
+        if (currentThreadSession) {
+            currentThreadSession->touch();
+        }
+    }
+
+    SessionContext::~SessionContext() { // Restore previously active session on this thread
+        currentThreadSession = std::move(_prevSession);
+        currentThreadSessionId = std::move(_prevId);
+    }
+
+    std::shared_ptr<Session> SessionContext::getCurrentSession() { // Retrieve the Session active on the calling thread
+        return currentThreadSession;
+    }
+
+    std::string SessionContext::getCurrentSessionId() { // Retrieve the session ID active on the calling thread
+        return currentThreadSessionId;
+    }
+
     HTTPServer::Json FetchResponse::json() const { // Parse the raw response body into an HTTPServer::Json value (or null on failure)
         if (rawBody.empty()) {
             return nullptr;
@@ -101,14 +208,14 @@ namespace UIEngine {
     }
 
     FetchResponse fetch(const std::string& urlOrEndpoint, const FetchOptions& options) { // Execute a synchronous HTTP request against the backend API or a full URL
-        const ParsedUrl target = parseHttpUrl(urlOrEndpoint);
+        const auto [host, port, path] = parseHttpUrl(urlOrEndpoint);
 
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
 
         addrinfo* res = nullptr;
-        if (getaddrinfo(target.host.c_str(), target.port.c_str(), &hints, &res) != 0 || !res) {
+        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0 || !res) {
             return FetchResponse{.status = 0, .rawBody = ""};
         }
 
@@ -130,8 +237,8 @@ namespace UIEngine {
 
         const std::string serializedBody = options.body.isNull() ? "" : options.body.dump();
         std::ostringstream reqStream;
-        reqStream << options.method << " " << target.path << " HTTP/1.1\r\n";
-        reqStream << "Host: " << target.host << ":" << target.port << "\r\n";
+        reqStream << options.method << " " << path << " HTTP/1.1\r\n";
+        reqStream << "Host: " << host << ":" << port << "\r\n";
         reqStream << "Connection: close\r\n";
 
         bool hasContentType = false;
@@ -189,18 +296,79 @@ namespace UIEngine {
     }
 
     namespace Detail {
+        void pushScope(std::string scopeName) { // Push a component scope identifier onto the thread-local scope stack
+            threadScopeStack.push_back(std::move(scopeName));
+        }
+
+        void popScope() { // Pop the most recent component scope identifier from the thread-local scope stack
+            if (!threadScopeStack.empty()) {
+                threadScopeStack.pop_back();
+            }
+        }
+
+        std::string getCurrentScope() { // Retrieve the current fully-qualified component scope path
+            return threadScopeStack.empty() ? "" : threadScopeStack.back();
+        }
+
+        std::string resolveStateKey(const std::string& rawKey) { // Resolve a state key against active component scope
+            if (rawKey.empty()) {
+                return rawKey;
+            }
+            if (rawKey.front() == '@' || rawKey.front() == '/') {
+                return rawKey.substr(1);
+            }
+            const std::string scope = getCurrentScope();
+            if (scope.empty() || rawKey.starts_with(scope + ".")) {
+                return rawKey;
+            }
+            return scope + "." + rawKey;
+        }
+
+        std::string generateComponentKey(const std::string& typeHint, const std::string& explicitKey) { // Generate a scoped component identifier
+            const std::string parentScope = getCurrentScope();
+            std::string childKey;
+            if (!explicitKey.empty()) {
+                childKey = explicitKey;
+            } else {
+                const std::string counterKey = parentScope.empty() ? typeHint : parentScope + "/" + typeHint;
+                const size_t index = threadChildIndexMap[counterKey]++;
+                childKey = typeHint + "#" + std::to_string(index);
+            }
+            return parentScope.empty() ? childKey : parentScope + "/" + childKey;
+        }
+
+        void resetRenderContext() { // Reset the render pass component indexing and scope stack
+            threadScopeStack.clear();
+            threadChildIndexMap.clear();
+        }
+
         std::any& getOrInitState(const std::string& key, const std::function<std::any()>& initializer) { // Retrieve a reference to the stored std::any value for key, initializing it if absent
-            std::lock_guard<std::mutex> lock(stateStoreMutex);
-            auto it = stateStore.find(key);
-            if (it == stateStore.end()) {
-                it = stateStore.emplace(key, initializer()).first;
+            const auto session = SessionContext::getCurrentSession();
+            if (session) {
+                std::lock_guard lock(session->mutex);
+                auto it = session->stateStore.find(key);
+                if (it == session->stateStore.end()) {
+                    it = session->stateStore.emplace(key, initializer()).first;
+                }
+                return it->second;
+            }
+            std::lock_guard lock(fallbackStateMutex);
+            auto it = fallbackStateStore.find(key);
+            if (it == fallbackStateStore.end()) {
+                it = fallbackStateStore.emplace(key, initializer()).first;
             }
             return it->second;
         }
 
         void setStateValue(const std::string& key, std::any value) { // Overwrite the stored std::any value for key in the persistent state store
-            std::lock_guard<std::mutex> lock(stateStoreMutex);
-            stateStore[key] = std::move(value);
+            const auto session = SessionContext::getCurrentSession();
+            if (session) {
+                std::lock_guard lock(session->mutex);
+                session->stateStore[key] = std::move(value);
+                return;
+            }
+            std::lock_guard lock(fallbackStateMutex);
+            fallbackStateStore[key] = std::move(value);
         }
     }
 
@@ -297,6 +465,35 @@ namespace UIEngine {
         }
     }
 
+    std::string Component::getComponentKey() const { // Determine unique scope identifier for this component instance
+        if (!_instanceKey.empty()) {
+            return _instanceKey;
+        }
+        std::string explicitKey;
+        if (hasProp("key")) {
+            explicitKey = getProp("key");
+        } else if (hasProp("id")) {
+            explicitKey = getProp("id");
+        }
+        _instanceKey = Detail::generateComponentKey(getComponentName(), explicitKey);
+        return _instanceKey;
+    }
+
+    std::string Component::scopeKey(const std::string& key) const { // Resolve a state key prefixed with this component instance scope
+        if (key.empty()) {
+            return key;
+        }
+        if (key.front() == '@' || key.front() == '/') {
+            return key.substr(1);
+        }
+        return getComponentKey() + "." + key;
+    }
+
+    VNode Component::renderWithScope() const { // Execute render() wrapped inside this component's active scope guard
+        Detail::ComponentScopeGuard guard(getComponentKey());
+        return render();
+    }
+
     namespace {
         std::string buildHtmlShell(const std::string& pageTitle) { // Build the minimal HTML shell containing the Virtual DOM renderer and C++ event bridge
             std::ostringstream html;
@@ -312,6 +509,20 @@ namespace UIEngine {
     <div id="root"></div>
     <script>
         let currentVNode = null;
+        let currentSessionId = (window.crypto && window.crypto.randomUUID)
+            ? window.crypto.randomUUID().replace(/-/g, "")
+            : "tab_" + Math.random().toString(36).substring(2) + Date.now().toString(36);
+
+        function getSessionId() {
+            return currentSessionId;
+        }
+
+        function syncSessionId(res) {
+            const serverSid = res.headers ? res.headers.get("X-Session-Id") : null;
+            if (serverSid) {
+                currentSessionId = serverSid;
+            }
+        }
 
         function renderTree(nextVNode) {
             if (!nextVNode) return;
@@ -327,14 +538,26 @@ namespace UIEngine {
 
         async function dispatchEvent(handlerId, eventPayload) {
             try {
+                const sid = getSessionId();
                 const res = await fetch("/event", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Session-Id": sid
+                    },
                     body: JSON.stringify({ handlerId, ...eventPayload })
                 });
+                syncSessionId(res);
                 if (res.ok) {
                     const nextVNode = await res.json();
                     renderTree(nextVNode);
+                } else if (res.status === 404) {
+                    const vdomRes = await fetch("/vdom", {
+                        headers: { "X-Session-Id": sid }
+                    });
+                    if (vdomRes.ok) {
+                        renderTree(await vdomRes.json());
+                    }
                 }
             } catch (err) {
                 console.error("Event dispatch failed:", err);
@@ -423,9 +646,15 @@ namespace UIEngine {
         }
 
         async function initApp() {
-            const res = await fetch("/vdom");
-            const initialVNode = await res.json();
-            renderTree(initialVNode);
+            const sid = getSessionId();
+            const res = await fetch("/vdom", {
+                headers: { "X-Session-Id": sid }
+            });
+            syncSessionId(res);
+            if (res.ok) {
+                const initialVNode = await res.json();
+                renderTree(initialVNode);
+            }
         }
 
         window.addEventListener("DOMContentLoaded", initApp);
@@ -439,15 +668,20 @@ namespace UIEngine {
     void serveApp(
         HTTPServer::Server& frontend,
         std::function<VNode()> rootFactory,
-        StyleSheet styleSheet,
+        const StyleSheet &styleSheet,
         std::string apiBaseUrl,
-        std::string pageTitle
+        const std::string &pageTitle
     ) { // Register "/", "/styles.css", "/vdom", and "/event" routes on the frontend server to serve the C++ VDOM app
         configuredApiBaseUrl = std::move(apiBaseUrl); // Store the configured backend base URL for UIEngine::fetch
         const std::string htmlShell = buildHtmlShell(pageTitle); // Pre-build the minimal HTML shell
         const std::string cssContent = styleSheet.toCss(); // Serialize the C++ StyleSheet into a CSS string
 
-        frontend.get("/", [htmlShell](const HTTPServer::ServerRequest&, HTTPServer::ServerResponse& res) { // Serve the HTML shell at GET /
+        frontend.get("/", [htmlShell](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the HTML shell at GET /
+            const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
+            const auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            SessionContext sessionCtx(session);
+            res.setHeader("X-Session-Id", sessionId);
+            res.setHeader("Set-Cookie", "lorikeet_session=" + sessionId + "; Path=/; SameSite=Lax");
             HTTPServer::Server::sendHtml(res, HTTP_OK, htmlShell);
         });
 
@@ -458,11 +692,25 @@ namespace UIEngine {
             res.body = cssContent;
         });
 
-        frontend.get("/vdom", [rootFactory](const HTTPServer::ServerRequest&, HTTPServer::ServerResponse& res) { // Serve the live serialized VNode JSON tree at GET /vdom
+        frontend.get("/vdom", [rootFactory](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the live serialized VNode JSON tree at GET /vdom
+            const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
+            const auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            {
+                std::lock_guard lock(session->mutex);
+                session->mounted = false;
+                session->stateStore.clear();
+            }
+            SessionContext sessionCtx(session);
+            res.setHeader("X-Session-Id", sessionId);
             HTTPServer::Server::sendJson(res, HTTP_OK, renderRootVNode(rootFactory));
         });
 
         frontend.post("/event", [factory = std::move(rootFactory)](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Dispatch a browser event to its C++ EventHandler and return the re-rendered VNode tree
+            const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
+            const auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            SessionContext sessionCtx(session);
+            res.setHeader("X-Session-Id", sessionId);
+
             const HTTPServer::Json payload = HTTPServer::Json::parse(req.body);
             if (!payload.isObject() || !payload.asObject().contains("handlerId")) {
                 HTTPServer::Server::sendJson(res, HTTP_BAD_REQUEST, HTTPServer::Json::Object{{"error", "Missing handlerId"}});
@@ -489,18 +737,19 @@ namespace UIEngine {
 
             EventHandler targetHandler;
             {
-                std::lock_guard<std::mutex> lock(handlerMutex);
-                const auto it = handlerRegistry.find(handlerId);
-                if (it != handlerRegistry.end()) {
+                std::lock_guard lock(session->mutex);
+                const auto it = session->handlerRegistry.find(handlerId);
+                if (it != session->handlerRegistry.end()) {
                     targetHandler = it->second;
                 }
             }
 
             if (targetHandler) {
                 targetHandler(event);
+                HTTPServer::Server::sendJson(res, HTTP_OK, renderRootVNode(factory));
+            } else {
+                HTTPServer::Server::sendJson(res, HTTP_NOT_FOUND, HTTPServer::Json::Object{{"error", "Unknown or expired handler ID"}});
             }
-
-            HTTPServer::Server::sendJson(res, HTTP_OK, renderRootVNode(factory));
         });
     }
 

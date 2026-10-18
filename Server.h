@@ -28,7 +28,8 @@ namespace HTTPServer {
 
         [[nodiscard]] bool hasQuery(const std::string& key) const; // Check if a query parameter exists in the request
         [[nodiscard]] std::string getQuery(const std::string& key, const std::string& fallback = "") const; // Retrieve a query parameter value, returning fallback if not found
-        [[nodiscard]] std::string getHeader(const std::string& key, const std::string& fallback = "") const; // Retrieve a request header value, returning fallback if not found
+        [[nodiscard]] std::string getHeader(const std::string& key, const std::string& fallback = "") const; // Retrieve a request header value (case-insensitive), returning fallback if not found
+        [[nodiscard]] std::string getCookie(const std::string& name, const std::string& fallback = "") const; // Retrieve a cookie value by name from the Cookie header, returning fallback if not found
     };
 
     struct ServerResponse { // Represents an outgoing HTTP response containing status code, response body, and content type
@@ -36,7 +37,14 @@ namespace HTTPServer {
         std::string body; // Response payload content to transmit to the client
         std::string contentType = "text/plain"; // Content-Type header value specifying the MIME type, defaults to text/plain
         std::string charset;
+        std::map<std::string, std::string> headers; // Custom outgoing HTTP response headers
+
+        void setHeader(std::string name, std::string value); // Set or overwrite an outgoing HTTP response header
+        [[nodiscard]] std::string getHeader(const std::string& name, const std::string& fallback = "") const; // Retrieve an outgoing response header value
     };
+
+    std::string generateSessionId(); // Generate a pseudo-random unique session identifier string
+    std::string extractOrCreateSessionId(const ServerRequest& req, const std::string& cookieName = "lorikeet_session"); // Extract session ID from request headers/cookies with fallback generation
 
     using RequestHandler = std::function<void(const ServerRequest&, ServerResponse&)>; // Function type definition for route handlers processing request and generating response
 
@@ -51,7 +59,7 @@ namespace HTTPServer {
             const std::string& getName() const; // Return the configured name of the server
 
             static void sendJson(ServerResponse& res, int status, const Json& json, int indent = -1); // Helper to serialize a Json object, set Content-Type to application/json, and set status code
-            static void sendHtml(ServerResponse& res, int status, const std::string html); // Helper to set Content-Type to text/html and set status code
+            static void sendHtml(ServerResponse& res, int status, const std::string &html); // Helper to set Content-Type to text/html and set status code
 
         private:
             int _port; // Port number on which the server listens for incoming connections

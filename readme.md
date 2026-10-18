@@ -1,1 +1,1 @@
-# Curently unnamed learning app's backend
+# Currently unnamed learning app's backend

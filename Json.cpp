@@ -5,7 +5,7 @@
 #include "Json.h"
 
 namespace HTTPServer {
-    std::string Json::dump(int indent) const { // Serialize the Json value to a string with optional indentation
+    std::string Json::dump(const int indent) const { // Serialize the Json value to a string with optional indentation
         std::string out; // String buffer to accumulate the serialized JSON output
         _dump(out, indent, 0); // Recursively serialize the JSON tree starting at depth 0
         return out; // Return the serialized JSON string
@@ -29,15 +29,15 @@ namespace HTTPServer {
     const Json::Object& Json::asObject() const { return std::get<Object>(_value); } // Return const reference to underlying Object map
 
     const Json& Json::operator[](const std::string& key) const { return asObject().at(key); } // Access an object member by key
-    const Json& Json::operator[](size_t i) const               { return asArray().at(i); } // Access an array element by index
+    const Json& Json::operator[](const size_t i) const         { return asArray().at(i); } // Access an array element by index
 
-    void Json::_newline(std::string& out, int indent, int depth) { // Append a newline and indentation spaces based on indentation level and nesting depth
+    void Json::_newline(std::string& out, const int indent, const int depth) { // Append a newline and indentation spaces based on indentation level and nesting depth
         if (indent < 0) return; // If indent is negative, formatting is compact, so do not insert newlines or indentation
         out += '\n'; // Append a newline character to break the line
         out.append(static_cast<size_t>(indent) * depth, ' '); // Append the required number of spaces corresponding to the current depth level
     }
 
-    std::string Json::_numberToString(double n) { // Format a double value into an accurate JSON-compliant string representation
+    std::string Json::_numberToString(const double n) { // Format a double value into an accurate JSON-compliant string representation
         if (!std::isfinite(n)) return "null"; // JSON does not support NaN or Infinity; replace with null per standard practice
         if (n == std::floor(n) && std::fabs(n) < 1e15) // Check if the number is an integer representable within standard integer limits
             return std::to_string(static_cast<long long>(n)); // Format directly as an integer string without decimals
@@ -50,7 +50,7 @@ namespace HTTPServer {
 
     void Json::_escape(const std::string& s, std::string& out) { // Escape special characters and control codes in a string according to JSON specification
         out += '"'; // Prepend opening double quotation mark
-        for (unsigned char c : s) { // Iterate over each byte in the string
+        for (const unsigned char c : s) { // Iterate over each byte in the string
             switch (c) { // Check for characters requiring backslash escape sequences
                 case '"':  out += "\\\""; break; // Escape double quotation mark
                 case '\\': out += "\\\\"; break; // Escape reverse solidus (backslash)
@@ -72,7 +72,7 @@ namespace HTTPServer {
         out += '"'; // Append closing double quotation mark
     }
 
-    void Json::_dump(std::string& out, int indent, int depth) const { // Recursively serialize this Json value to JSON text at the given nesting depth
+    void Json::_dump(std::string& out, const int indent, const int depth) const { // Recursively serialize this Json value to JSON text at the given nesting depth
         if (std::holds_alternative<Null>(_value)) { // Check if value is null
             out += "null"; // Append literal null to output
         } else if (auto* b = std::get_if<bool>(&_value)) { // Check if value is boolean
@@ -123,14 +123,14 @@ namespace HTTPServer {
         throw std::runtime_error("JSON parse error at position " + std::to_string(_pos) + ": " + msg); // Form and throw runtime_error detailing position and message
     }
 
-    bool Json::Parser::_isDigit(char c) { return c >= '0' && c <= '9'; } // Return true if character is an ASCII digit between '0' and '9'
+    bool Json::Parser::_isDigit(const char c) { return c >= '0' && c <= '9'; } // Return true if character is an ASCII digit between '0' and '9'
 
     void Json::Parser::_skipWs() { // Advance the cursor past any whitespace characters
         while (_pos < _s.size() && (_s[_pos] == ' ' || _s[_pos] == '\t' || _s[_pos] == '\n' || _s[_pos] == '\r')) // Loop while current char is a space, tab, newline, or carriage return
             ++_pos; // Advance position index
     }
 
-    void Json::Parser::_consume(char expected) { // Skip whitespace and ensure next character matches expected character
+    void Json::Parser::_consume(const char expected) { // Skip whitespace and ensure next character matches expected character
         _skipWs(); // Advance past any preceding whitespace
         if (_pos >= _s.size() || _s[_pos] != expected) // Check if end of input reached or character does not match
             _fail(std::string("expected '") + expected + "'"); // Fail with an error reporting expected character
@@ -143,11 +143,11 @@ namespace HTTPServer {
         _pos += len; // Advance cursor past the keyword length
     }
 
-    Json Json::Parser::_parseValue(int depth) { // Parse any JSON value according to the starting token character
+    Json Json::Parser::_parseValue(const int depth) { // Parse any JSON value according to the starting token character
         if (depth > MAX_DEPTH) _fail("nesting too deep"); // Enforce recursion limit to prevent stack overflow
         _skipWs(); // Skip leading whitespace
         if (_pos >= _s.size()) _fail("unexpected end of input"); // Fail if end of input reached before value
-        switch (char c = _s[_pos]) { // Inspect next character to determine value type
+        switch (const char c = _s[_pos]) { // Inspect next character to determine value type
             case '{': return _parseObject(depth); // Parse JSON object starting with '{'
             case '[': return _parseArray(depth); // Parse JSON array starting with '['
             case '"': return Json(_parseString()); // Parse JSON string starting with '"'
@@ -160,7 +160,7 @@ namespace HTTPServer {
         }
     }
 
-    Json Json::Parser::_parseObject(int depth) { // Parse a JSON object into an Object key-value map
+    Json Json::Parser::_parseObject(const int depth) { // Parse a JSON object into an Object key-value map
         ++_pos; // Consume the opening '{' brace
         Object obj; // Map to store parsed object key-value pairs
         _skipWs(); // Skip whitespace following opening brace
@@ -179,7 +179,7 @@ namespace HTTPServer {
         return Json(std::move(obj)); // Return parsed object wrapped in Json value
     }
 
-    Json Json::Parser::_parseArray(int depth) { // Parse a JSON array into an Array vector
+    Json Json::Parser::_parseArray(const int depth) { // Parse a JSON array into an Array vector
         ++_pos; // Consume the opening '[' bracket
         Array arr; // Vector to store parsed array elements
         _skipWs(); // Skip whitespace following opening bracket
@@ -198,7 +198,7 @@ namespace HTTPServer {
         if (_pos + 4 > _s.size()) _fail("incomplete \\u escape"); // Fail if fewer than 4 characters remain in input
         unsigned v = 0; // Accumulator for the 16-bit hex value
         for (int i = 0; i < 4; ++i) { // Process 4 hexadecimal digits
-            char c = _s[_pos++]; // Read next digit character and advance cursor
+            const char c = _s[_pos++]; // Read next digit character and advance cursor
             v <<= 4; // Shift accumulated value left by 4 bits
             if      (c >= '0' && c <= '9') v |= c - '0'; // Add numeric value of digit ('0'-'9')
             else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10; // Add value of lowercase hex letter ('a'-'f')
@@ -208,7 +208,7 @@ namespace HTTPServer {
         return v; // Return decoded 16-bit unsigned integer value
     }
 
-    void Json::Parser::_appendUtf8(std::string& out, unsigned cp) { // Encode a Unicode code point as UTF-8 bytes and append to the output string
+    void Json::Parser::_appendUtf8(std::string& out, const unsigned cp) { // Encode a Unicode code point as UTF-8 bytes and append to the output string
         if (cp < 0x80) { // Code points 0x0000 - 0x007F: encode as 1 byte
             out += static_cast<char>(cp); // Direct 7-bit ASCII byte
         } else if (cp < 0x800) { // Code points 0x0080 - 0x07FF: encode as 2 bytes
@@ -231,7 +231,7 @@ namespace HTTPServer {
         std::string out; // String buffer to accumulate decoded characters
         while (true) { // Loop until closing quotation mark is encountered
             if (_pos >= _s.size()) _fail("unterminated string"); // Fail if end of input is reached before closing quote
-            unsigned char c = static_cast<unsigned char>(_s[_pos++]); // Read current character and advance cursor
+            const unsigned char c = static_cast<unsigned char>(_s[_pos++]); // Read current character and advance cursor
             if (c == '"') return out; // Return decoded string upon encountering closing quote
             if (c < 0x20) _fail("unescaped control character in string"); // Unescaped control characters (< 0x20) are forbidden in JSON strings
             if (c != '\\') { out += static_cast<char>(c); continue; } // Append unescaped regular character and continue
@@ -250,7 +250,7 @@ namespace HTTPServer {
                     if (cp >= 0xD800 && cp <= 0xDBFF) { // Check if code point is a UTF-16 high surrogate
                         if (_s.compare(_pos, 2, "\\u") != 0) _fail("lone high surrogate"); // High surrogate must be followed by low surrogate "\u"
                         _pos += 2; // Consume "\u" prefix
-                        unsigned lo = _parseHex4(); // Parse 4-digit hex for low surrogate
+                        const unsigned lo = _parseHex4(); // Parse 4-digit hex for low surrogate
                         if (lo < 0xDC00 || lo > 0xDFFF) _fail("invalid low surrogate"); // Validate low surrogate range (0xDC00 - 0xDFFF)
                         cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); // Decode surrogate pair into Unicode scalar value
                     } else if (cp >= 0xDC00 && cp <= 0xDFFF) { // Unpaired low surrogate encountered
@@ -270,7 +270,7 @@ namespace HTTPServer {
     }
 
     Json Json::Parser::_parseNumber() { // Parse a JSON number literal into a numeric Json instance
-        size_t start = _pos; // Record starting index of the numeric literal
+        const size_t start = _pos; // Record starting index of the numeric literal
         if (_s[_pos] == '-') ++_pos; // Consume leading minus sign if present
         if (_pos < _s.size() && _s[_pos] == '0') ++_pos; // Leading zero (cannot be followed by digits without decimal point)
         else _requireDigits(); // Non-zero number must start with one or more digits

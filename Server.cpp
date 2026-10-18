@@ -4,7 +4,9 @@
 
 #include "Server.h"
 
+#include <iomanip>
 #include <iostream>
+#include <random>
 #include <ranges>
 #include <sstream>
 #include <unistd.h>
@@ -21,9 +23,80 @@ namespace HTTPServer {
         return it != query.end() ? it->second : fallback; // If the key is found, return its value; otherwise, return the fallback
     }
 
-    std::string ServerRequest::getHeader(const std::string& key, const std::string& fallback) const { // Get the value of a header, or return a fallback if it doesn't exist
-        const auto it = headers.find(key); // Use the find method of std::map to look for the key
+    std::string ServerRequest::getHeader(const std::string& key, const std::string& fallback) const { // Get the value of a header (case-insensitively), or return a fallback if it doesn't exist
+        std::string lowerKey = key;
+        for (char& c : lowerKey) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const auto it = headers.find(lowerKey); // Use the find method of std::map to look for the key
         return it != headers.end() ? it->second : fallback; // If the key is found, return its value; otherwise, return the fallback
+    }
+
+    std::string ServerRequest::getCookie(const std::string& name, const std::string& fallback) const { // Retrieve a cookie value by name from the Cookie header, returning fallback if not found
+        const std::string cookieHeader = getHeader("cookie");
+        if (cookieHeader.empty()) {
+            return fallback;
+        }
+
+        size_t start = 0;
+        while (start < cookieHeader.size()) {
+            size_t end = cookieHeader.find(';', start);
+            if (end == std::string::npos) {
+                end = cookieHeader.size();
+            }
+            std::string pair = cookieHeader.substr(start, end - start);
+            const size_t first = pair.find_first_not_of(" \t");
+            const size_t last = pair.find_last_not_of(" \t");
+            if (first != std::string::npos && last != std::string::npos) {
+                pair = pair.substr(first, last - first + 1);
+            } else {
+                pair.clear();
+            }
+
+            const size_t eq = pair.find('=');
+            if (eq != std::string::npos) {
+                const std::string k = pair.substr(0, eq);
+                const std::string v = pair.substr(eq + 1);
+                if (k == name) {
+                    return v;
+                }
+            }
+            start = end + 1;
+        }
+        return fallback;
+    }
+
+    void ServerResponse::setHeader(std::string name, std::string value) { // Set or overwrite an outgoing HTTP response header
+        headers[std::move(name)] = std::move(value);
+    }
+
+    std::string ServerResponse::getHeader(const std::string& name, const std::string& fallback) const { // Retrieve an outgoing response header value
+        const auto it = headers.find(name);
+        return it != headers.end() ? it->second : fallback;
+    }
+
+    std::string generateSessionId() { // Generate a pseudo-random unique session identifier string
+        thread_local std::mt19937_64 rng(std::random_device{}());
+        std::uniform_int_distribution<uint64_t> dist;
+        const uint64_t p1 = dist(rng);
+        const uint64_t p2 = dist(rng);
+        std::ostringstream ss;
+        ss << std::hex << std::setfill('0')
+           << std::setw(16) << p1
+           << std::setw(16) << p2;
+        return ss.str();
+    }
+
+    std::string extractOrCreateSessionId(const ServerRequest& req, const std::string& cookieName) { // Extract session ID from request headers/cookies with fallback generation
+        std::string sid = req.getHeader("x-session-id");
+        if (!sid.empty()) {
+            return sid;
+        }
+        sid = req.getCookie(cookieName);
+        if (!sid.empty()) {
+            return sid;
+        }
+        return generateSessionId();
     }
 
     //region public methods
@@ -51,7 +124,7 @@ namespace HTTPServer {
     }
 
     std::thread Server::startAsync() { // Start the server in a separate background thread so multiple servers can run concurrently
-        return std::thread([this]() { // Spawn and return a std::thread executing this server's blocking start() method
+        return std::thread([this] { // Spawn and return a std::thread executing this server's blocking start() method
             this->start(); // Invoke start() on the current Server instance inside the background thread
         });
     }
@@ -73,7 +146,7 @@ namespace HTTPServer {
         res.body = json.dump(indent); // Serialize the provided Json object to a string using the dump method, with the specified indentation level, and set it as the body of the response
     }
 
-    void Server::sendHtml(ServerResponse &res, int status, const std::string html) { // Send a HTML response to the client, setting the status code, content type, and body of the response
+    void Server::sendHtml(ServerResponse &res, const int status, const std::string &html) { // Send a HTML response to the client, setting the status code, content type, and body of the response
         res.status = status; // Set the HTTP status code of the response to the provided status value
         res.contentType = "text/html"; // Set the Content-Type header of the response to "text/html" to indicate that the response body contains HTML data
         res.charset = "utf-8"; // Set the charset parameter of the Content-Type header to "utf-8" to indicate that the response body is encoded in UTF-8
@@ -133,7 +206,7 @@ namespace HTTPServer {
         this->_address.sin_port = htons(this->_port); // Set the port number for the socket, converting it to network byte order using htons (host-to-network short)
 
         if (bind(this->_server_fd, reinterpret_cast<sockaddr*>(&this->_address), sizeof(this->_address)) == -1) { // Attempt to bind the socket to the specified address and port, checking for errors (bind returns -1 on failure)
-            _logError("Failed to bind socket"); // Print an error message to standard error indicating that the socket binding failed
+            _logError("Failed to bind socket: " + std::string(strerror(errno))); // Print an error message with errno
             return false;
         }
 
@@ -176,12 +249,18 @@ namespace HTTPServer {
         out << "HTTP/1.1 " << response.status << " " << _getStatusMessage(response.status) << "\r\n"
                     << "Content-Type: " << response.contentType
                     << (response.charset.empty() ? "" : "; charset=" + response.charset) << "\r\n"
-                    << "Content-Length: " << response.body.size() << "\r\n"
-                    << "Access-Control-Allow-Origin: *\r\n"
-                    << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                    << "Access-Control-Allow-Headers: Content-Type\r\n"
-                    << "Connection: close\r\n\r\n"
-                    << response.body;
+                    << "Content-Length: " << response.body.size() << "\r\n";
+
+        for (const auto& [name, value] : response.headers) {
+            out << name << ": " << value << "\r\n";
+        }
+
+        out << "Access-Control-Allow-Origin: *\r\n"
+            << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            << "Access-Control-Allow-Headers: Content-Type, X-Session-Id\r\n"
+            << "Access-Control-Expose-Headers: X-Session-Id\r\n"
+            << "Connection: close\r\n\r\n"
+            << response.body;
         return out.str();
     }
 
@@ -251,17 +330,17 @@ namespace HTTPServer {
         }
     }
 
-    void Server::_handleClient(int client_fd) { // Process an accepted client connection by reading the request, routing it, sending the response, and closing the connection
+    void Server::_handleClient(const int client_fd) { // Process an accepted client connection by reading the request, routing it, sending the response, and closing the connection
         ServerRequest request; // Instantiate a ServerRequest object to hold the parsed incoming request data
         ServerResponse response; // Instantiate a ServerResponse object to hold the response data to be generated
 
-        int status = _readRequest(client_fd, request); // Read and parse the incoming HTTP request from the client socket, returning 0 on success or an HTTP status code on error
+        const int status = _readRequest(client_fd, request); // Read and parse the incoming HTTP request from the client socket, returning 0 on success or an HTTP status code on error
         if (status < 0) { close(client_fd); return; } // If reading failed or the client disconnected prematurely, close the socket and exit early
 
         if (status != 0) _setError(response, status); // If request reading or validation returned an error status code, set the error response
         else             _dispatch(request, response); // Otherwise, dispatch the valid request to the matching registered route handler
 
-        std::string out = _buildResponse(response); // Serialize the ServerResponse object into a formatted HTTP response string
+        const std::string out = _buildResponse(response); // Serialize the ServerResponse object into a formatted HTTP response string
         write(client_fd, out.c_str(), out.size()); // Write the complete HTTP response string to the client socket
         close(client_fd); // Close the client connection socket since HTTP Connection: close is used
     }
@@ -279,14 +358,14 @@ namespace HTTPServer {
         }
     }
 
-    int Server::_readRequest(int client_fd, ServerRequest &request) { // Read raw bytes from the client socket, extract headers and body according to Content-Length, and populate the ServerRequest object
+    int Server::_readRequest(const int client_fd, ServerRequest &request) { // Read raw bytes from the client socket, extract headers and body according to Content-Length, and populate the ServerRequest object
         std::string raw; // Buffer to accumulate raw data read from the socket until all headers are received
         char buffer[4096]; // Chunk buffer of 4 KB used to read data from the socket in increments
 
         size_t headEnd; // Variable to store position of double CRLF ("\r\n\r\n") separating headers from the request body
         while ((headEnd = raw.find("\r\n\r\n")) == std::string::npos) { // Loop until the double CRLF indicating the end of the HTTP headers is found
             if (raw.size() > MAX_HEADER_SIZE) return 431; // If accumulated raw data exceeds the maximum allowed header size, return HTTP 431 (Request Header Fields Too Large)
-            ssize_t n = read(client_fd, buffer, sizeof(buffer)); // Read incoming bytes from the client socket into the temporary chunk buffer
+            const ssize_t n = read(client_fd, buffer, sizeof(buffer)); // Read incoming bytes from the client socket into the temporary chunk buffer
             if (n <= 0) return -1; // If read returns 0 (client closed connection) or negative (read error), return -1 to signal failure
             raw.append(buffer, static_cast<size_t>(n)); // Append newly read bytes to the raw request buffer string
         }
@@ -297,7 +376,7 @@ namespace HTTPServer {
         if (request.headers.contains("transfer-encoding")) return 501; // Return HTTP 501 (Not Implemented) if Transfer-Encoding header is present (chunked encoding not supported)
 
         size_t contentLength = 0; // Initialize expected body length to 0
-        auto it = request.headers.find("content-length"); // Look up Content-Length header in the parsed headers map
+        const auto it = request.headers.find("content-length"); // Look up Content-Length header in the parsed headers map
         if (it != request.headers.end()) { // If Content-Length header is present, validate and extract its numeric value
             const std::string& value = it->second; // Retrieve string value of the Content-Length header
             if (value.empty() || !std::isdigit(static_cast<unsigned char>(value[0]))) return HTTP_BAD_REQUEST; // If value is empty or does not start with a digit, return HTTP 400 (Bad Request)
@@ -311,15 +390,15 @@ namespace HTTPServer {
             if (contentLength > MAX_BODY_SIZE) return 413; // If content length exceeds maximum allowed body size (1 MB), return HTTP 413 (Payload Too Large)
         }
 
-        auto expect = request.headers.find("expect"); // Look up Expect header in the parsed headers map
+        const auto expect = request.headers.find("expect"); // Look up Expect header in the parsed headers map
         if (body.size() < contentLength && expect != request.headers.end() && // Check if body is incomplete and Expect header was supplied
             _toLower(expect->second) == "100-continue") { // Check if Expect header value is "100-continue"
-            std::string cont = "HTTP/1.1 100 Continue\r\n\r\n"; // Prepare the HTTP 100 Continue interim response string
+            const std::string cont = "HTTP/1.1 100 Continue\r\n\r\n"; // Prepare the HTTP 100 Continue interim response string
             write(client_fd, cont.c_str(), cont.size()); // Send 100 Continue response to client to prompt sending of remaining body
         }
 
         while (body.size() < contentLength) { // Loop until the entire body of length contentLength has been read from the socket
-            ssize_t n = read(client_fd, buffer, sizeof(buffer)); // Read subsequent bytes of the body from the client socket into the buffer
+            const ssize_t n = read(client_fd, buffer, sizeof(buffer)); // Read subsequent bytes of the body from the client socket into the buffer
             if (n <= 0) return -1; // If read fails or client disconnects prematurely, return -1 to signal failure
             body.append(buffer, static_cast<size_t>(n)); // Append incoming bytes to the body string
         }
@@ -329,7 +408,7 @@ namespace HTTPServer {
         return 0; // Return 0 to indicate request was successfully read and prepared
     }
 
-    void Server::_setError(ServerResponse& res, int status) { // Helper function to set an error response with the given HTTP status code and a JSON body containing the error message
+    void Server::_setError(ServerResponse& res, const int status) { // Helper function to set an error response with the given HTTP status code and a JSON body containing the error message
         sendJson(res, status, Json::Object{{"error", _getStatusMessage(status)}}); // Serialize a JSON object with an "error" key set to the status message and populate the response
     }
 
@@ -342,7 +421,7 @@ namespace HTTPServer {
 
         const auto methodIt = _routes.find(request.method); // Look up routing map corresponding to the request's HTTP method (e.g. "GET" or "POST")
         if (methodIt != _routes.end()) { // If routes have been registered for this HTTP method
-            auto it = methodIt->second.find(request.path); // Look up handler registered for the specific request path within this method's routes
+            const auto it = methodIt->second.find(request.path); // Look up handler registered for the specific request path within this method's routes
             if (it != methodIt->second.end()) { // If a matching route handler is found for the path
                 try { // Execute the route handler within a try-catch block to gracefully handle any exceptions thrown by handler code
                     it->second(request, response); // Invoke the registered route handler function, passing the request and response references
