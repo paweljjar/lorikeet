@@ -3,13 +3,8 @@ project(lorikeet)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(lorikeet main.cpp
-        Server.cpp
-        Server.h
-        Json.cpp
-        Json.h
-        Database.cpp
-        Database.h
-        UIEngine.cpp
-        UIEngine.h
-)
+add_subdirectory(external/keet)
+
+add_executable(lorikeet main.cpp)
+
+target_link_libraries(lorikeet PRIVATE keet)

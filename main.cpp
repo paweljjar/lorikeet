@@ -2,11 +2,10 @@
 #include <map>
 #include <string>
 #include <vector>
-
-#include "Database.h"
-#include "Json.h"
-#include "Server.h"
-#include "UIEngine.h"
+#include <keet/Database.h>
+#include <keet/Json.h>
+#include <keet/Server.h>
+#include <keet/UIEngine.h>
 
 using namespace HTTPServer;
 
