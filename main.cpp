@@ -1,6 +1,6 @@
-#include <string>
-#include <map>
 #include <functional>
+#include <map>
+#include <string>
 #include <vector>
 
 #include "Database.h"
@@ -14,6 +14,8 @@ namespace {
     class TopBar : public UIEngine::Component { // Friendly gamified header bar with Lorikeet mascot, app title, and word counter pill
         public:
             using Component::Component;
+
+            [[nodiscard]] std::string getComponentName() const override { return "TopBar"; }
 
             [[nodiscard]] UIEngine::VNode render() const override {
                 const std::string count = getProp("count", "0");
@@ -70,6 +72,11 @@ namespace {
             using Component::Component;
 
             [[nodiscard]] std::string getComponentName() const override { return "Counter"; }
+
+            void onMount() override {
+                const int initial = std::stoi(getProp("initial", "0"));
+                useState<int>("count", initial).set(initial);
+            }
 
             [[nodiscard]] UIEngine::VNode render() const override {
                 const std::string label = getProp("label", "Counter");
@@ -146,6 +153,8 @@ namespace {
     class AddWordCard : public UIEngine::Component { // Tactile card with form to add a new word and translation via C++ onSubmit handler
         public:
             using Component::Component;
+
+            [[nodiscard]] std::string getComponentName() const override { return "AddWordCard"; }
 
             [[nodiscard]] UIEngine::VNode render() const override {
                 const UIEngine::EventHandler onAdded = getCallback("onAdded");
@@ -256,6 +265,8 @@ namespace {
         public:
             using Component::Component;
 
+            [[nodiscard]] std::string getComponentName() const override { return "WordCard"; }
+
             [[nodiscard]] UIEngine::VNode render() const override {
                 const std::string id = getProp("id", "0");
                 const UIEngine::EventHandler onDeleted = getCallback("onDeleted");
@@ -342,6 +353,8 @@ namespace {
         public:
             using Component::Component;
 
+            [[nodiscard]] std::string getComponentName() const override { return "App"; }
+
             void onMount() override {
                 refreshWords();
             }
@@ -394,8 +407,8 @@ namespace {
                         {"count", std::to_string(wordList.size())}
                     }),
                     UIEngine::Tags::section({{"class", "goals-section"}}, {
-                        Counter({{"label", "🎯 Daily Goal"}}),
-                        Counter({{"label", "🔥 Streak Count"}})
+                        Counter({{"label", "🎯 Daily Goal"}, {"initial", "10"}}),
+                        Counter({{"label", "🔥 Streak Count"}, {"initial", "3"}})
                     }),
                     AddWordCard({
                         {"onAdded", [this] { refreshWords(); }}
