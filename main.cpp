@@ -1,5 +1,4 @@
 #include <functional>
-#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
@@ -17,14 +16,6 @@ namespace {
             using Component::Component;
 
             [[nodiscard]] std::string getComponentName() const override { return "TopBar"; }
-
-            void onMount() override {
-                std::cout << "[Lifecycle] Mounted " << getComponentKey() << std::endl;
-            }
-
-            void onUnmount() override {
-                std::cout << "[Lifecycle] Unmounted " << getComponentKey() << std::endl;
-            }
 
             [[nodiscard]] UIEngine::VNode render() const override {
                 const std::string count = getProp("count", "0");
@@ -83,11 +74,8 @@ namespace {
             [[nodiscard]] std::string getComponentName() const override { return "Counter"; }
 
             void onMount() override {
-                std::cout << "[Lifecycle] Mounted " << getComponentKey() << " (" << getProp("label", "Counter") << ")" << std::endl;
-            }
-
-            void onUnmount() override {
-                std::cout << "[Lifecycle] Unmounted " << getComponentKey() << " (" << getProp("label", "Counter") << ")" << std::endl;
+                const int initial = std::stoi(getProp("initial", "0"));
+                useState<int>("count", initial).set(initial);
             }
 
             [[nodiscard]] UIEngine::VNode render() const override {
@@ -167,14 +155,6 @@ namespace {
             using Component::Component;
 
             [[nodiscard]] std::string getComponentName() const override { return "AddWordCard"; }
-
-            void onMount() override {
-                std::cout << "[Lifecycle] Mounted " << getComponentKey() << std::endl;
-            }
-
-            void onUnmount() override {
-                std::cout << "[Lifecycle] Unmounted " << getComponentKey() << std::endl;
-            }
 
             [[nodiscard]] UIEngine::VNode render() const override {
                 const UIEngine::EventHandler onAdded = getCallback("onAdded");
@@ -287,14 +267,6 @@ namespace {
 
             [[nodiscard]] std::string getComponentName() const override { return "WordCard"; }
 
-            void onMount() override {
-                std::cout << "[Lifecycle] Mounted " << getComponentKey() << " (word=\"" << getProp("word") << "\")" << std::endl;
-            }
-
-            void onUnmount() override {
-                std::cout << "[Lifecycle] Unmounted " << getComponentKey() << " (word=\"" << getProp("word") << "\")" << std::endl;
-            }
-
             [[nodiscard]] UIEngine::VNode render() const override {
                 const std::string id = getProp("id", "0");
                 const UIEngine::EventHandler onDeleted = getCallback("onDeleted");
@@ -384,12 +356,7 @@ namespace {
             [[nodiscard]] std::string getComponentName() const override { return "App"; }
 
             void onMount() override {
-                std::cout << "[Lifecycle] Mounted " << getComponentKey() << std::endl;
                 refreshWords();
-            }
-
-            void onUnmount() override {
-                std::cout << "[Lifecycle] Unmounted " << getComponentKey() << std::endl;
             }
 
             void refreshWords() const {
@@ -440,8 +407,8 @@ namespace {
                         {"count", std::to_string(wordList.size())}
                     }),
                     UIEngine::Tags::section({{"class", "goals-section"}}, {
-                        Counter({{"label", "🎯 Daily Goal"}}),
-                        Counter({{"label", "🔥 Streak Count"}})
+                        Counter({{"label", "🎯 Daily Goal"}, {"initial", "10"}}),
+                        Counter({{"label", "🔥 Streak Count"}, {"initial", "3"}})
                     }),
                     AddWordCard({
                         {"onAdded", [this] { refreshWords(); }}

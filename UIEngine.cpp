@@ -94,15 +94,27 @@ namespace UIEngine {
                 std::lock_guard lock(session->mutex);
                 session->handlerRegistry.clear();
                 session->nextHandlerId = 0;
-                const VNode rootNode = rootFactory();
-                Detail::reconcileUnmountedComponents();
+                VNode rootNode = rootFactory();
+                if (Detail::reconcileUnmountedComponents()) {
+                    Detail::resetRenderContext();
+                    session->handlerRegistry.clear();
+                    session->nextHandlerId = 0;
+                    rootNode = rootFactory();
+                    Detail::reconcileUnmountedComponents();
+                }
                 return rootNode.toJson();
             }
             std::lock_guard lock(fallbackHandlerMutex);
             fallbackHandlerRegistry.clear();
             fallbackNextHandlerId = 0;
-            const VNode rootNode = rootFactory();
-            Detail::reconcileUnmountedComponents();
+            VNode rootNode = rootFactory();
+            if (Detail::reconcileUnmountedComponents()) {
+                Detail::resetRenderContext();
+                fallbackHandlerRegistry.clear();
+                fallbackNextHandlerId = 0;
+                rootNode = rootFactory();
+                Detail::reconcileUnmountedComponents();
+            }
             return rootNode.toJson();
         }
 
@@ -410,7 +422,7 @@ namespace UIEngine {
             }
         }
 
-        void reconcileUnmountedComponents() { // Invoke onUnmount() and clean up scoped state for components that disappeared in the latest render pass
+        bool reconcileUnmountedComponents() { // Invoke onUnmount() and clean up scoped state for components that disappeared in the latest render pass
             const auto session = SessionContext::getCurrentSession();
             if (session) {
                 std::lock_guard lock(session->mutex);
@@ -419,6 +431,9 @@ namespace UIEngine {
                     if (!threadVisitedComponents.contains(key)) {
                         unmountedKeys.push_back(key);
                     }
+                }
+                if (unmountedKeys.empty()) {
+                    return false;
                 }
                 sortUnmountOrder(unmountedKeys);
                 for (const std::string& key : unmountedKeys) {
@@ -433,7 +448,7 @@ namespace UIEngine {
                     }
                     eraseScopedStateForKey(session->stateStore, key);
                 }
-                return;
+                return true;
             }
 
             std::lock_guard lock(fallbackStateMutex);
@@ -442,6 +457,9 @@ namespace UIEngine {
                 if (!threadVisitedComponents.contains(key)) {
                     unmountedKeys.push_back(key);
                 }
+            }
+            if (unmountedKeys.empty()) {
+                return false;
             }
             sortUnmountOrder(unmountedKeys);
             for (const std::string& key : unmountedKeys) {
@@ -456,6 +474,7 @@ namespace UIEngine {
                 }
                 eraseScopedStateForKey(fallbackStateStore, key);
             }
+            return true;
         }
 
         void unmountAllComponents(Session& session) { // Invoke onUnmount() for all mounted components in the given session and clear its lifecycle registry

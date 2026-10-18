@@ -135,7 +135,7 @@ namespace UIEngine {
         void resetRenderContext(); // Reset the render pass component indexing and scope stack
 
         void registerComponentMount(const std::string& key, Component& comp, std::function<void()> unmountFn); // Record component in current render pass and invoke onMount() if newly mounted
-        void reconcileUnmountedComponents(); // Invoke onUnmount() and clean up scoped state for components that disappeared in the latest render pass
+        bool reconcileUnmountedComponents(); // Invoke onUnmount() and clean up scoped state for components that disappeared in the latest render pass
         void unmountAllComponents(Session& session); // Invoke onUnmount() for all mounted components in the given session and clear its lifecycle registry
 
         class ComponentScopeGuard { // RAII guard pushing and popping a component scope during rendering
