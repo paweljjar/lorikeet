@@ -4,6 +4,7 @@
 
 #include "UIEngine.h"
 
+#include <algorithm>
 #include <mutex>
 #include <netdb.h>
 #include <set>
@@ -30,6 +31,31 @@ namespace UIEngine {
         size_t fallbackNextHandlerId = 0; // Fallback handler ID counter
 
         std::string configuredApiBaseUrl = "http://localhost:8000"; // Default base URL used to resolve relative endpoints in UIEngine::fetch
+
+        void sortUnmountOrder(std::vector<std::string>& keys) { // Sort component scope keys deepest-first so children unmount before parents
+            std::sort(keys.begin(), keys.end(), [](const std::string& a, const std::string& b) {
+                const auto depthA = std::count(a.begin(), a.end(), '/');
+                const auto depthB = std::count(b.begin(), b.end(), '/');
+                if (depthA != depthB) {
+                    return depthA > depthB;
+                }
+                if (a.size() != b.size()) {
+                    return a.size() > b.size();
+                }
+                return a > b;
+            });
+        }
+
+        void eraseScopedStateForKey(std::map<std::string, std::any>& store, const std::string& compKey) { // Remove all state entries owned by compKey
+            const std::string prefix = compKey + ".";
+            for (auto it = store.begin(); it != store.end(); ) {
+                if (it->first == compKey || it->first.starts_with(prefix)) {
+                    it = store.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
 
         std::string normalizeEventAttr(const std::string& propName) { // Map C++ event prop names (e.g., "onClick") to DOM data attributes (e.g., "data-on-click")
             if (propName == "onClick" || propName == "onclick" || propName == "data-on-click") {
@@ -61,19 +87,23 @@ namespace UIEngine {
             return id;
         }
 
-        HTTPServer::Json renderRootVNode(const std::function<VNode()>& rootFactory) { // Clear handler registry, render the root VNode tree, and serialize it to JSON
+        HTTPServer::Json renderRootVNode(const std::function<VNode()>& rootFactory) { // Clear handler registry, render the root VNode tree, reconcile unmounts, and serialize to JSON
             Detail::resetRenderContext();
             const auto session = SessionContext::getCurrentSession();
             if (session) {
                 std::lock_guard lock(session->mutex);
                 session->handlerRegistry.clear();
                 session->nextHandlerId = 0;
-                return rootFactory().toJson();
+                const VNode rootNode = rootFactory();
+                Detail::reconcileUnmountedComponents();
+                return rootNode.toJson();
             }
             std::lock_guard lock(fallbackHandlerMutex);
             fallbackHandlerRegistry.clear();
             fallbackNextHandlerId = 0;
-            return rootFactory().toJson();
+            const VNode rootNode = rootFactory();
+            Detail::reconcileUnmountedComponents();
+            return rootNode.toJson();
         }
 
         struct ParsedUrl { // Decomposed HTTP URL components for establishing a TCP socket connection
@@ -151,9 +181,20 @@ namespace UIEngine {
         return nullptr;
     }
 
-    void SessionManager::removeSession(const std::string& sessionId) { // Remove and destroy a session by ID
-        std::lock_guard lock(_mutex);
-        _sessions.erase(sessionId);
+    void SessionManager::removeSession(const std::string& sessionId) { // Remove and destroy a session by ID after unmounting its components
+        std::shared_ptr<Session> removedSession;
+        {
+            std::lock_guard lock(_mutex);
+            const auto it = _sessions.find(sessionId);
+            if (it != _sessions.end()) {
+                removedSession = it->second;
+                _sessions.erase(it);
+            }
+        }
+        if (removedSession) {
+            SessionContext sessionCtx(removedSession);
+            Detail::unmountAllComponents(*removedSession);
+        }
     }
 
     void SessionManager::setTtl(const std::chrono::seconds ttl) { // Configure the maximum idle time before an inactive session is pruned
@@ -170,7 +211,10 @@ namespace UIEngine {
         const auto now = std::chrono::steady_clock::now();
         for (auto it = _sessions.begin(); it != _sessions.end(); ) {
             if (now - it->second->lastAccessed > _ttl) {
+                std::shared_ptr<Session> expiredSession = it->second;
                 it = _sessions.erase(it);
+                SessionContext sessionCtx(expiredSession);
+                Detail::unmountAllComponents(*expiredSession);
             } else {
                 ++it;
             }
@@ -351,27 +395,89 @@ namespace UIEngine {
             const auto session = SessionContext::getCurrentSession();
             if (session) {
                 std::lock_guard lock(session->mutex);
-                if (!session->mountedComponents.contains(key)) {
-                    session->mountedComponents[key] = std::move(unmountFn);
+                const bool isNew = !session->mountedComponents.contains(key);
+                session->mountedComponents[key] = std::move(unmountFn);
+                if (isNew) {
                     comp.onMount();
-                } else {
-                    session->mountedComponents[key] = std::move(unmountFn);
                 }
                 return;
             }
             std::lock_guard lock(fallbackStateMutex);
-            if (!fallbackMountedComponents.contains(key)) {
-                fallbackMountedComponents[key] = std::move(unmountFn);
+            const bool isNew = !fallbackMountedComponents.contains(key);
+            fallbackMountedComponents[key] = std::move(unmountFn);
+            if (isNew) {
                 comp.onMount();
-            } else {
-                fallbackMountedComponents[key] = std::move(unmountFn);
             }
         }
 
         void reconcileUnmountedComponents() { // Invoke onUnmount() and clean up scoped state for components that disappeared in the latest render pass
+            const auto session = SessionContext::getCurrentSession();
+            if (session) {
+                std::lock_guard lock(session->mutex);
+                std::vector<std::string> unmountedKeys;
+                for (const auto& [key, _] : session->mountedComponents) {
+                    if (!threadVisitedComponents.contains(key)) {
+                        unmountedKeys.push_back(key);
+                    }
+                }
+                sortUnmountOrder(unmountedKeys);
+                for (const std::string& key : unmountedKeys) {
+                    const auto it = session->mountedComponents.find(key);
+                    if (it != session->mountedComponents.end()) {
+                        std::function<void()> unmountFn = std::move(it->second);
+                        session->mountedComponents.erase(it);
+                        if (unmountFn) {
+                            ComponentScopeGuard guard(key);
+                            unmountFn();
+                        }
+                    }
+                    eraseScopedStateForKey(session->stateStore, key);
+                }
+                return;
+            }
+
+            std::lock_guard lock(fallbackStateMutex);
+            std::vector<std::string> unmountedKeys;
+            for (const auto& [key, _] : fallbackMountedComponents) {
+                if (!threadVisitedComponents.contains(key)) {
+                    unmountedKeys.push_back(key);
+                }
+            }
+            sortUnmountOrder(unmountedKeys);
+            for (const std::string& key : unmountedKeys) {
+                const auto it = fallbackMountedComponents.find(key);
+                if (it != fallbackMountedComponents.end()) {
+                    std::function<void()> unmountFn = std::move(it->second);
+                    fallbackMountedComponents.erase(it);
+                    if (unmountFn) {
+                        ComponentScopeGuard guard(key);
+                        unmountFn();
+                    }
+                }
+                eraseScopedStateForKey(fallbackStateStore, key);
+            }
         }
 
-        void unmountAllComponents(Session& /*session*/) { // Invoke onUnmount() for all mounted components in the given session and clear its lifecycle registry
+        void unmountAllComponents(Session& session) { // Invoke onUnmount() for all mounted components in the given session and clear its lifecycle registry
+            std::lock_guard lock(session.mutex);
+            std::vector<std::string> allKeys;
+            allKeys.reserve(session.mountedComponents.size());
+            for (const auto& [key, _] : session.mountedComponents) {
+                allKeys.push_back(key);
+            }
+            sortUnmountOrder(allKeys);
+            for (const std::string& key : allKeys) {
+                const auto it = session.mountedComponents.find(key);
+                if (it != session.mountedComponents.end()) {
+                    std::function<void()> unmountFn = std::move(it->second);
+                    session.mountedComponents.erase(it);
+                    if (unmountFn) {
+                        ComponentScopeGuard guard(key);
+                        unmountFn();
+                    }
+                }
+            }
+            session.mountedComponents.clear();
         }
 
         std::any& getOrInitState(const std::string& key, const std::function<std::any()>& initializer) { // Retrieve a reference to the stored std::any value for key, initializing it if absent
@@ -522,7 +628,9 @@ namespace UIEngine {
     }
 
     VNode Component::renderWithScope() const { // Execute render() wrapped inside this component's active scope guard
-        Detail::ComponentScopeGuard guard(getComponentKey());
+        const std::string key = getComponentKey();
+        Detail::ComponentScopeGuard guard(key);
+        Detail::registerComponentMount(key, const_cast<Component&>(*this), [] {});
         return render();
     }
 
@@ -727,12 +835,12 @@ namespace UIEngine {
         frontend.get("/vdom", [rootFactory](const HTTPServer::ServerRequest& req, HTTPServer::ServerResponse& res) { // Serve the live serialized VNode JSON tree at GET /vdom
             const std::string sessionId = HTTPServer::extractOrCreateSessionId(req);
             const auto session = SessionManager::instance().getOrCreateSession(sessionId);
+            SessionContext sessionCtx(session);
             {
                 std::lock_guard lock(session->mutex);
-                session->mountedComponents.clear();
+                Detail::unmountAllComponents(*session);
                 session->stateStore.clear();
             }
-            SessionContext sessionCtx(session);
             res.setHeader("X-Session-Id", sessionId);
             HTTPServer::Server::sendJson(res, HTTP_OK, renderRootVNode(rootFactory));
         });
