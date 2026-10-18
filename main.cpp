@@ -372,7 +372,7 @@ namespace {
 
                 if (wordList.empty()) {
                     cardNodes.push_back(
-                        UIEngine::Tags::div({{"class", "empty-state"}}, {
+                        UIEngine::Tags::div({{"key", "empty-state"}, {"class", "empty-state"}}, {
                             UIEngine::Tags::p({{"class", "empty-title"}}, "No flashcards yet!"),
                             UIEngine::Tags::p({{"class", "empty-sub"}}, "Add your first word and translation above.")
                         })
@@ -393,6 +393,7 @@ namespace {
                             : "";
 
                         cardNodes.push_back(WordCard({
+                            {"key", "word-" + id},
                             {"id", id},
                             {"word", word},
                             {"translation", translation},
@@ -407,8 +408,8 @@ namespace {
                         {"count", std::to_string(wordList.size())}
                     }),
                     UIEngine::Tags::section({{"class", "goals-section"}}, {
-                        Counter({{"label", "🎯 Daily Goal"}, {"initial", "10"}}),
-                        Counter({{"label", "🔥 Streak Count"}, {"initial", "3"}})
+                        Counter({{"key", "daily-goal"}, {"label", "🎯 Daily Goal"}}),
+                        Counter({{"key", "streak-count"}, {"label", "🔥 Streak Count"}})
                     }),
                     AddWordCard({
                         {"onAdded", [this] { refreshWords(); }}

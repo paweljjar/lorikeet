@@ -565,20 +565,31 @@ namespace UIEngine {
     }
 
     VNode VNode::textNode(std::string content) { // Create a raw text VNode with tag "#text" and the given text content
-        return VNode("#text", {}, std::move(content), {}); // Initialize VNode with "#text" tag, empty props, moved text, and no children
+        return VNode{.tag = "#text", .props = {}, .text = std::move(content), .children = {}, .key = ""}; // Initialize VNode with "#text" tag, empty props, moved text, and no children
     }
 
     VNode VNode::el(std::string tag, Props props, std::vector<VNode> children) { // Create an HTML element VNode with tag, attributes, and child nodes
-        return VNode(std::move(tag), std::move(props), "", std::move(children)); // Initialize VNode with moved tag, props, empty text, and moved children
+        std::string extractedKey; // Extract reconciliation key from props if provided as a string
+        const auto it = props.find("key");
+        if (it != props.end()) {
+            if (it->second.isString()) {
+                extractedKey = it->second.asString();
+            }
+            props.erase(it); // Remove "key" so it is not emitted as a DOM HTML attribute
+        }
+        return VNode{.tag = std::move(tag), .props = std::move(props), .text = "", .children = std::move(children), .key = std::move(extractedKey)}; // Initialize VNode with moved tag, props, empty text, moved children, and extracted key
     }
 
     HTTPServer::Json VNode::toJson() const { // Recursively serialize this VNode and its children into an HTTPServer::Json object
         HTTPServer::Json::Object propsObj; // Create a JSON object map to hold this node's HTML attributes and event handler IDs
-        for (const auto& [key, val] : props) { // Iterate through each key-value pair in the VNode's Props map
+        for (const auto& [propKey, val] : props) { // Iterate through each key-value pair in the VNode's Props map
+            if (propKey == "key") { // Skip reconciliation key if present in props
+                continue;
+            }
             if (val.isString()) {
-                propsObj[key] = val.asString(); // Insert the attribute name and string value into the JSON object
+                propsObj[propKey] = val.asString(); // Insert the attribute name and string value into the JSON object
             } else if (val.isHandler()) {
-                propsObj[normalizeEventAttr(key)] = registerEventHandler(val.asHandler()); // Register C++ callback and emit its handler ID
+                propsObj[normalizeEventAttr(propKey)] = registerEventHandler(val.asHandler()); // Register C++ callback and emit its handler ID
             }
         }
 
@@ -590,6 +601,7 @@ namespace UIEngine {
 
         return HTTPServer::Json::Object{ // Construct and return the complete JSON object representing this VNode
             {"tag", tag},
+            {"key", key},
             {"props", std::move(propsObj)},
             {"text", text},
             {"children", std::move(childrenArr)}
@@ -647,10 +659,13 @@ namespace UIEngine {
     }
 
     VNode Component::renderWithScope() const { // Execute render() wrapped inside this component's active scope guard
-        const std::string key = getComponentKey();
-        Detail::ComponentScopeGuard guard(key);
-        Detail::registerComponentMount(key, const_cast<Component&>(*this), [] {});
-        return render();
+        const std::string compKey = getComponentKey();
+        Detail::ComponentScopeGuard guard(compKey);
+        VNode node = render();
+        if (node.key.empty()) {
+            node.key = compKey;
+        }
+        return node;
     }
 
     namespace {
@@ -779,13 +794,90 @@ namespace UIEngine {
             return el;
         }
 
+        function reconcileChildren(parentDom, oldChildren, newChildren) {
+            const hasKeys = oldChildren.some(c => c && c.key) || newChildren.some(c => c && c.key);
+            if (!hasKeys) {
+                while (parentDom.childNodes.length > newChildren.length) {
+                    parentDom.removeChild(parentDom.lastChild);
+                }
+                for (let i = 0; i < newChildren.length; i++) {
+                    patchDom(parentDom, oldChildren[i], newChildren[i], i);
+                }
+                return;
+            }
+
+            const existingDomNodes = Array.from(parentDom.childNodes);
+            const keyedOldMap = new Map();
+            const unkeyedOldIndices = [];
+
+            for (let i = 0; i < oldChildren.length; i++) {
+                const oldChild = oldChildren[i];
+                const domNode = existingDomNodes[i];
+                if (oldChild && oldChild.key) {
+                    keyedOldMap.set(oldChild.key, { vnode: oldChild, dom: domNode, index: i });
+                } else {
+                    unkeyedOldIndices.push(i);
+                }
+            }
+
+            const matchedOldIndices = new Set();
+            let unkeyedCursor = 0;
+            const matchedPairs = new Array(newChildren.length);
+
+            for (let i = 0; i < newChildren.length; i++) {
+                const newChild = newChildren[i];
+                if (newChild && newChild.key) {
+                    const entry = keyedOldMap.get(newChild.key);
+                    if (entry && !matchedOldIndices.has(entry.index)) {
+                        matchedOldIndices.add(entry.index);
+                        matchedPairs[i] = entry;
+                    } else {
+                        matchedPairs[i] = null;
+                    }
+                } else {
+                    while (unkeyedCursor < unkeyedOldIndices.length && matchedOldIndices.has(unkeyedOldIndices[unkeyedCursor])) {
+                        unkeyedCursor++;
+                    }
+                    if (unkeyedCursor < unkeyedOldIndices.length) {
+                        const oldIdx = unkeyedOldIndices[unkeyedCursor++];
+                        matchedOldIndices.add(oldIdx);
+                        matchedPairs[i] = { vnode: oldChildren[oldIdx], dom: existingDomNodes[oldIdx], index: oldIdx };
+                    } else {
+                        matchedPairs[i] = null;
+                    }
+                }
+            }
+
+            for (let i = 0; i < existingDomNodes.length; i++) {
+                if (!matchedOldIndices.has(i) && existingDomNodes[i] && existingDomNodes[i].parentNode === parentDom) {
+                    parentDom.removeChild(existingDomNodes[i]);
+                }
+            }
+
+            for (let i = 0; i < newChildren.length; i++) {
+                const newChild = newChildren[i];
+                const match = matchedPairs[i];
+                const referenceNode = parentDom.childNodes[i] || null;
+
+                if (match && match.dom) {
+                    if (match.dom !== referenceNode) {
+                        parentDom.insertBefore(match.dom, referenceNode);
+                    }
+                    patchDom(parentDom, match.vnode, newChild, i);
+                } else {
+                    const createdDom = createDomNode(newChild);
+                    parentDom.insertBefore(createdDom, referenceNode);
+                }
+            }
+        }
+
         function patchDom(parent, oldVNode, newVNode, index = 0) {
             const existingNode = parent.childNodes[index];
             if (!oldVNode) {
                 parent.appendChild(createDomNode(newVNode));
             } else if (!newVNode) {
                 if (existingNode) parent.removeChild(existingNode);
-            } else if (oldVNode.tag !== newVNode.tag) {
+            } else if (oldVNode.tag !== newVNode.tag || (oldVNode.key || "") !== (newVNode.key || "")) {
                 parent.replaceChild(createDomNode(newVNode), existingNode);
             } else if (newVNode.tag === "#text") {
                 if (oldVNode.text !== newVNode.text && existingNode) {
@@ -795,12 +887,7 @@ namespace UIEngine {
                 applyProps(existingNode, oldVNode.props || {}, newVNode.props || {});
                 const oldChildren = oldVNode.children || [];
                 const newChildren = newVNode.children || [];
-                while (existingNode.childNodes.length > newChildren.length) {
-                    existingNode.removeChild(existingNode.lastChild);
-                }
-                for (let i = 0; i < newChildren.length; i++) {
-                    patchDom(existingNode, oldChildren[i], newChildren[i], i);
-                }
+                reconcileChildren(existingNode, oldChildren, newChildren);
             }
         }
 
